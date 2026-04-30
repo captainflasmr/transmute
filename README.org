@@ -1,4 +1,5 @@
-#+TITLE: Transmute
+#+TITLE: Transmute (Tool for Rapid Automated Normalization, Scaling, Metadata Updates, and Text Extraction)
+
 #+AUTHOR: James Dyer
 #+EMAIL: james@dyerdwelling.family
 
