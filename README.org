@@ -1,0 +1,55 @@
+#+TITLE: Transmute
+#+AUTHOR: James Dyer
+#+EMAIL: james@dyerdwelling.family
+
+Transmute is a comprehensive media management and conversion suite for Emacs. It provides a native Elisp interface to powerful command-line tools like =ffmpeg=, =ImageMagick=, =exiftool=, =sox=, and =tesseract=.
+
+Designed for Dired users, Transmute allows you to batch process images, videos, and audio files with a structured, keyboard-driven interface.
+
+* Features
+
+- *Images:* Convert, resize (crush/scale), upscale (GAN), rotate, brighten, auto-colour, crop, OCR (text extraction), and convert to PDF.
+- *Video:* Convert (H.264/AAC), shrink, reverse, speed up/slow down, trim (top/tail), cut, extract audio, and convert to GIF.
+- *Audio:* Convert to MP3, normalise volume, and trim silence.
+- *Metadata:* Interactive hierarchical tagging, renaming based on creation date/tags, and EXIF management.
+- *Interface:* Includes both a *Transient* menu (like Magit) and a *Completing-Read* menu.
+
+* Dependencies
+
+Transmute relies on the following tools being installed in your system path:
+
+- =exiftool= (Metadata management)
+- =magick= (ImageMagick 7+ for image processing)
+- =ffmpeg= / =ffprobe= (Video and audio processing)
+- =sox= (Audio normalisation)
+- =tesseract= (OCR/Text extraction)
+- =realesrgan-ncnn-vulkan= (Optional: for AI upscaling)
+- =trash-put= (Optional: for safe file deletion)
+
+* Installation
+
+1. Clone this repository to your local machine:
+   #+begin_src bash
+   git clone https://github.com/captainflasmr/transmute.git ~/source/repos/transmute
+   #+end_src
+2. Add the following to your Emacs configuration:
+   #+begin_src elisp
+   (add-to-list 'load-path "~/source/repos/transmute")
+   (require 'transmute)
+
+   ;; Bind the main Transient menu
+   (global-set-key (kbd "C-c v") #'transmute-menu)
+   #+end_src
+
+* Usage
+
+In any Dired buffer:
+1. Mark the files you wish to process.
+2. Press =C-c v= to open the Transmute menu.
+3. Select the desired operation (e.g., =i c= for image convert).
+
+If no files are marked, Transmute will operate on the file at point.
+
+* License
+
+GPLv3
