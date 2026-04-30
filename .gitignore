@@ -1,0 +1,25 @@
+# Temporary files
+*transmute-*
+*.tmp
+*.bak
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Emacs
+*~
+#*#
+*.el~
+*.el-lock
+*.org~
+*.org-lock
+
+# Build artifacts
+*.pdf
+*.gif
+*.mp3
+*.mp4
+*.wav
+*.jpg
+*.png

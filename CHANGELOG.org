@@ -1,0 +1,30 @@
+#+title: Change Log for transmute
+#+author: James Dyer
+#+email: james@dyerdwelling.family
+#+language: en
+#+options: ':t toc:nil author:nil email:nil num:nil title:nil
+#+todo: TODO DOING | DONE
+#+startup: showall
+
+This document contains the release notes for each tagged commit on the
+project's main git repository.
+
+* Versions
+
+** <<22026-04-30 Thu> *0.1.0*
+
+Initial release of Transmute.
+
+*** Features
+
+- *Core Media Processing* -- Native Elisp wrappers for =magick=, =ffmpeg=, =exiftool=, =sox=, and =tesseract= for batch processing of images, video, and audio.
+- *Transient Menu* -- Keyboard-driven interface for quickly triggering media operations from Dired.
+- *Dired Integration* -- Support for processing marked files or the file at point in Dired buffers.
+- *Filename Parsing* -- Intelligent parsing of filenames following the `YYYYMMDDHHMMSS--description__tag1@tag2.ext` pattern.
+- *Metadata Preservation* -- Automated metadata copying and modification time restoration using =exiftool= and =set-file-times=.
+- *Batch Processing* -- Implementation of `transmute-do-batch` macro for consistent iteration over target files.
+- *Image Utilities* -- Support for resizing (crush/scale), rotation, colors correction, GAN upscaling, OCR text extraction, and PDF conversion.
+- *Video Utilities* -- Support for conversion to MP4, shrinking, extraction of audio, trimming (top/tail), cutting, reversing, and GIF conversion.
+- *Audio Utilities* -- Support for MP3 conversion, volume normalization, and silence trimming.
+- *Tagging System* -- Interactive tagging of media files using =exiftool= with hierarchical support.
+- *Date-based Renaming* -- Ability to rename files based on EXIF creation dates.
