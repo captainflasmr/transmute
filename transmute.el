@@ -256,11 +256,11 @@ Filters out exiftool warning lines from the output."
 
 (defun transmute--preserve-metadata (src dst)
   "Copy metadata from SRC to DST, excluding image dimensions and orientation.
-Also sets FileModifyDate from DateTimeOriginal and Orientation to Normal."
+Sets Orientation to Normal."
   (transmute--run-command "exiftool" "-overwrite_original_in_place" "-Orientation=1" "-n"
                           "-TagsFromFile" src 
                           "--ExifImageWidth" "--ExifImageHeight" "--Orientation"
-                          "-FileModifyDate<DateTimeOriginal" dst))
+                          dst))
 
 (defun transmute--trash (file)
   "Move FILE to trash."
@@ -270,8 +270,8 @@ Also sets FileModifyDate from DateTimeOriginal and Orientation to Normal."
 
 (defun transmute--exif-cmd (src dst)
   "Return exiftool command string to copy tags from SRC to DST, excluding image dimensions.
-Also sets FileModifyDate from DateTimeOriginal and Orientation to Normal."
-  (format "exiftool -overwrite_original_in_place -Orientation=1 -n -TagsFromFile %s --ExifImageWidth --ExifImageHeight --Orientation -FileModifyDate<DateTimeOriginal %s"
+Sets Orientation to Normal."
+  (format "exiftool -overwrite_original_in_place -Orientation=1 -n -TagsFromFile %s --ExifImageWidth --ExifImageHeight --Orientation %s"
           (shell-quote-argument src) (shell-quote-argument dst)))
 
 (defun transmute--rotate-image (file degrees)
@@ -301,11 +301,12 @@ Preserves metadata and moves SRC to trash."
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
          (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
          (exif-cmd (transmute--exif-cmd src tmp))
-         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+         (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
          (trash-cmd (unless (string= src dst)
                       (format "%s %s" transmute-trash-command (shell-quote-argument src))))
-         (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+         (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-image-copy (src dst &rest magick-args)
@@ -316,9 +317,10 @@ Preserves metadata, keeps SRC."
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
          (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
          (exif-cmd (transmute--exif-cmd src tmp))
-         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+         (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (full-cmd (mapconcat #'identity (list magick-cmd exif-cmd cp-cmd rm-tmp) " && ")))
+         (full-cmd (mapconcat #'identity (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-video (src dst &rest ffmpeg-args)
@@ -332,7 +334,7 @@ Preserves metadata."
                                         ffmpeg-args
                                         (list tmp)) " "))
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
-         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
          (full-cmd (mapconcat #'identity (list ffmpeg-cmd touch-cmd cp-cmd rm-tmp) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
@@ -345,11 +347,12 @@ Preserves metadata and moves SRC to trash."
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
          (gan-cmd (mapconcat #'shell-quote-argument (append (list "realesrgan-ncnn-vulkan") gan-args (list "-i" src "-o" tmp)) " "))
          (exif-cmd (transmute--exif-cmd src tmp))
-         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+         (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
          (trash-cmd (unless (string= src dst)
                       (format "%s %s" transmute-trash-command (shell-quote-argument src))))
-         (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+         (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 ;;; Batch / Dired Integration
@@ -1052,6 +1055,11 @@ Re-scans the source directory to pick up renamed files, then refreshes."
                          (buffer-live-p dired-image-thumbnail--dired-buffer))
                 (with-current-buffer dired-image-thumbnail--dired-buffer
                   (revert-buffer nil t)))
+              ;; Clear dimension cache so header line shows updated sizes
+              (when (bound-and-true-p dired-image-thumbnail--dimension-cache)
+                (clrhash dired-image-thumbnail--dimension-cache))
+              (when (bound-and-true-p dired-image-thumbnail--dimension-pending)
+                (clrhash dired-image-thumbnail--dimension-pending))
               (when (and (boundp 'dired-image-thumbnail--source-dir)
                          dired-image-thumbnail--source-dir
                          (fboundp 'dired-image-thumbnail--find-images))
