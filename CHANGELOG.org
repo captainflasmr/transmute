@@ -11,6 +11,18 @@ project's main git repository.
 
 * Versions
 
+** <<22026-05-02 Sat> *0.2.0*
+
+Significant architectural update to support asynchronous non-blocking media processing.
+
+*** Features
+
+- *Asynchronous Execution* -- All media conversion tasks now run in the background, preventing Emacs from hanging during large batch operations.
+- *Header-Line Progress* -- Real-time progress indicator in the window header line (e.g., `[Transmuting: 5/10 (50%)]`) which appears only when tasks are active.
+- *Centralized Logging* -- All conversion output, start/end status, and failure details are consolidated in a dedicated =*transmute-log*= buffer.
+- *Abort Support* -- Ability to immediately stop all active conversions via `transmute-stop-conversions` (bound to =S= in the menu).
+- *Improved Process Management* -- Automatic cleanup of temporary files and individual process buffers after task completion.
+
 ** <<22026-04-30 Thu> *0.1.0*
 
 Initial release of Transmute.

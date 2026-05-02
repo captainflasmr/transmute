@@ -20,7 +20,94 @@
   "Media management and conversion utilities."
   :group 'media)
 
+(defvar transmute-active-processes nil
+  "List of active transmute processes.")
+
+(defvar transmute-total-tasks 0
+  "Total number of tasks in the current batch.")
+
+(defvar transmute-completed-tasks 0
+  "Number of completed tasks in the current batch.")
+
+(defvar transmute-log-buffer-name "*transmute-log*"
+  "Name of the buffer for transmute conversion output.")
+
+(defun transmute-show-log ()
+  "Show the transmute log buffer."
+  (interactive)
+  (pop-to-buffer (get-buffer-create transmute-log-buffer-name)))
+
+(defun transmute-stop-conversions ()
+  "Stop all currently active transmute conversions."
+  (interactive)
+  (when transmute-active-processes
+    (let ((count (length transmute-active-processes)))
+      (dolist (proc transmute-active-processes)
+        (when (process-live-p proc)
+          (interrupt-process proc)))
+      (setq transmute-active-processes nil
+            transmute-total-tasks 0
+            transmute-completed-tasks 0)
+      (transmute--update-progress-display)
+      (transmute--log "[ABORT] Stopped %d active conversions." count)
+      (message "Stopped %d active conversions." count))))
+
+(defun transmute--log (msg &rest args)
+  "Log MSG with ARGS to the transmute log buffer."
+  (let ((buf (get-buffer-create transmute-log-buffer-name))
+        (inhibit-read-only t))
+    (with-current-buffer buf
+      (unless (eq major-mode 'compilation-mode)
+        (compilation-mode))
+      (save-excursion
+        (goto-char (point-max))
+        (insert (apply #'format msg args) "\n")))))
+
+(defun transmute-header-line-format ()
+  "Return the header line format for transmute progress."
+  (when (> transmute-total-tasks 0)
+    (let* ((pct (if (> transmute-total-tasks 0)
+                    (/ (* 100 transmute-completed-tasks) transmute-total-tasks)
+                  0))
+           (active (length transmute-active-processes)))
+      (concat
+       (propertize (format " [Transmuting: %d/%d (%d%%)] " 
+                           transmute-completed-tasks 
+                           transmute-total-tasks
+                           pct)
+                   'face '(:inherit mode-line-highlight :weight bold))
+       (when (> active 0)
+         (format " (%d active) " active))))))
+
+(defvar transmute--header-line-entry '(:eval (transmute-header-line-format))
+  "The entry added to `header-line-format`.")
+
+(defun transmute--update-progress-display ()
+  "Update the global header line based on active tasks."
+  (when (bound-and-true-p transmute-progress-mode)
+    (let ((current (default-value 'header-line-format)))
+      (if (> transmute-total-tasks 0)
+          (unless (member transmute--header-line-entry current)
+            (setq-default header-line-format 
+                          (if current 
+                              (cons transmute--header-line-entry current)
+                            (list transmute--header-line-entry))))
+        (let ((new-fmt (delete transmute--header-line-entry current)))
+          ;; Clean up potential (nil) or empty lists that cause blank bars
+          (setq-default header-line-format (if (or (null new-fmt) (equal new-fmt '(nil)))
+                                               nil
+                                             new-fmt)))))
+    (force-mode-line-update t)))
+
+;;;###autoload
+(define-minor-mode transmute-progress-mode
+  "Show transmute progress in the header line."
+  :global t
+  :group 'transmute
+  (transmute--update-progress-display))
+
 (defcustom transmute-trash-command "trash-put"
+
   "Command to use for trashing files."
   :type 'string
   :group 'transmute)
@@ -89,6 +176,43 @@ Tries CreateDate, DateTimeOriginal, ModifyDate, and FileModifyDate."
 
 ;;; Internal Process Wrappers
 
+(defun transmute--process-sentinel (process _event)
+  "Sentinel for transmute processes."
+  (when (memq (process-status process) '(exit signal))
+    (setq transmute-active-processes (delq process transmute-active-processes))
+    (setq transmute-completed-tasks (1+ transmute-completed-tasks))
+    (let ((buf (process-buffer process))
+          (name (process-name process))
+          (exit-code (process-exit-status process)))
+      (if (zerop exit-code)
+          (progn
+            (transmute--log "[SUCCESS] %s" name)
+            (message "Transmute task finished: %s" name)
+            (when (buffer-live-p buf) (kill-buffer buf)))
+        (transmute--log "[FAILED] %s (exit code %d)" name exit-code)
+        (message "Transmute task FAILED: %s" name)
+        (when (buffer-live-p buf)
+          (transmute--log "--- Output for %s ---" name)
+          (transmute--log "%s" (with-current-buffer buf (buffer-string)))
+          (transmute--log "---------------------" name)
+          (kill-buffer buf))))
+    (when (null transmute-active-processes)
+      (setq transmute-total-tasks 0
+            transmute-completed-tasks 0))
+    (transmute--update-progress-display)))
+
+(defun transmute--run-command-async (name cmd)
+  "Run CMD string asynchronously as NAME."
+  (transmute--log "[START] %s: %s" name cmd)
+  (let ((process (start-process-shell-command name 
+                                              (generate-new-buffer (format " *transmute-%s*" name))
+                                              cmd)))
+    (push process transmute-active-processes)
+    (set-process-sentinel process #'transmute--process-sentinel)
+    (set-process-query-on-exit-flag process nil)
+    (transmute--update-progress-display)
+    process))
+
 (defun transmute--run-command (cmd &rest args)
   "Run CMD with ARGS and return exit code."
   (let ((full-cmd (mapconcat #'shell-quote-argument (cons cmd args) " ")))
@@ -111,54 +235,67 @@ Tries CreateDate, DateTimeOriginal, ModifyDate, and FileModifyDate."
 (defun transmute-convert-image (src dst &rest magick-args)
   "Convert image SRC to DST using MAGICK-ARGS.
 Preserves metadata and moves SRC to trash."
-  (let ((tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst)))))
-    (unwind-protect
-        (progn
-          (apply #'transmute--run-command "magick" src (append magick-args (list tmp)))
-          (transmute--preserve-metadata src tmp)
-          (copy-file tmp dst t t t t)
-          (unless (string= (expand-file-name src) (expand-file-name dst))
-            (transmute--trash src)))
-      (when (file-exists-p tmp) (delete-file tmp)))))
+  (let* ((src (expand-file-name src))
+         (dst (expand-file-name dst))
+         (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
+         (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
+         (exif-cmd (format "exiftool -overwrite_original_in_place -TagsFromFile %s %s"
+                           (shell-quote-argument src) (shell-quote-argument tmp)))
+         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+         (trash-cmd (unless (string= src dst)
+                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+         (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-image-copy (src dst &rest magick-args)
   "Convert image SRC to DST using MAGICK-ARGS.
 Preserves metadata, keeps SRC."
-  (let ((tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst)))))
-    (unwind-protect
-        (progn
-          (apply #'transmute--run-command "magick" src (append magick-args (list tmp)))
-          (transmute--preserve-metadata src tmp)
-          (copy-file tmp dst t t t t))
-      (when (file-exists-p tmp) (delete-file tmp)))))
+  (let* ((src (expand-file-name src))
+         (dst (expand-file-name dst))
+         (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
+         (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
+         (exif-cmd (format "exiftool -overwrite_original_in_place -TagsFromFile %s %s"
+                           (shell-quote-argument src) (shell-quote-argument tmp)))
+         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+         (full-cmd (mapconcat #'identity (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp) " && ")))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-video (src dst &rest ffmpeg-args)
   "Convert video SRC to DST using FFMPEG-ARGS.
 Preserves metadata."
-  (let ((tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst)))))
-    (unwind-protect
-        (progn
-          (let ((cmd-args (append (list "-hide_banner" "-loglevel" "warning" "-stats" "-y" "-i" src "-map_metadata" "0" "-threads" "8")
-                                  ffmpeg-args
-                                  (list tmp))))
-            (apply #'transmute--run-command "ffmpeg" cmd-args))
-          (set-file-times tmp (file-attribute-modification-time (file-attributes src)))
-          (copy-file tmp dst t t t t))
-      (when (file-exists-p tmp) (delete-file tmp)))))
+  (let* ((src (expand-file-name src))
+         (dst (expand-file-name dst))
+         (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
+         (ffmpeg-cmd (mapconcat #'shell-quote-argument 
+                                (append (list "ffmpeg" "-hide_banner" "-loglevel" "warning" "-stats" "-y" "-i" src "-map_metadata" "0" "-threads" "8")
+                                        ffmpeg-args
+                                        (list tmp)) " "))
+         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+         (full-cmd (mapconcat #'identity (list ffmpeg-cmd touch-cmd cp-cmd rm-tmp) " && ")))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-gan (src dst &rest gan-args)
   "Upscale image SRC to DST using realesrgan-ncnn-vulkan with GAN-ARGS.
 Preserves metadata and moves SRC to trash."
-  (let ((tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst)))))
-    (unwind-protect
-        (progn
-          (let ((cmd-args (append gan-args (list "-i" src "-o" tmp))))
-            (apply #'transmute--run-command "realesrgan-ncnn-vulkan" cmd-args))
-          (transmute--preserve-metadata src tmp)
-          (copy-file tmp dst t t t t)
-          (unless (string= (expand-file-name src) (expand-file-name dst))
-            (transmute--trash src)))
-      (when (file-exists-p tmp) (delete-file tmp)))))
+  (let* ((src (expand-file-name src))
+         (dst (expand-file-name dst))
+         (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
+         (gan-cmd (mapconcat #'shell-quote-argument (append (list "realesrgan-ncnn-vulkan") gan-args (list "-i" src "-o" tmp)) " "))
+         (exif-cmd (format "exiftool -overwrite_original_in_place -TagsFromFile %s %s"
+                           (shell-quote-argument src) (shell-quote-argument tmp)))
+         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+         (trash-cmd (unless (string= src dst)
+                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+         (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 ;;; Batch / Dired Integration
 
@@ -170,11 +307,14 @@ If in dired, use marked files or file at point. Otherwise ask for file."
     (list (read-file-name "Process file: "))))
 
 (defmacro transmute-do-batch (files &rest body)
-  "Run BODY for each file in FILES, binding 'file' to current file."
+  "Run BODY for each file in FILES, binding \='file\=' to current file."
   (declare (indent 1))
-  `(dolist (file ,files)
-     (let ((default-directory (file-name-directory file)))
-       ,@body)))
+  `(let ((batch-files ,files))
+     (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files)))
+     (transmute--update-progress-display)
+     (dolist (file batch-files)
+       (let ((default-directory (file-name-directory file)))
+         ,@body))))
 
 ;;; Specific Commands
 
@@ -334,9 +474,15 @@ If in dired, use marked files or file at point. Otherwise ask for file."
         (let* ((file (car targets))
                (parsed (transmute--parse-filename file))
                (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".pdf")))
-          (transmute--run-command "magick" file dst))
+          (transmute--run-command-async (file-name-nondirectory file)
+                                          (format "magick %s %s" 
+                                                  (shell-quote-argument file)
+                                                  (shell-quote-argument dst))))
       (let ((dst (read-file-name "Output PDF: ")))
-        (apply #'transmute--run-command "magick" (append targets (list dst)))))))
+        (transmute--run-command-async "Batch PDF"
+                                        (format "magick %s %s"
+                                                (mapconcat #'shell-quote-argument targets " ")
+                                                (shell-quote-argument dst)))))))
 
 ;;;###autoload
 (defun transmute-tag-interactive (tags)
@@ -346,7 +492,7 @@ TAGS is a comma-separated string or list of tags."
   (let* ((tag-list (if (stringp tags) (split-string tags "," t) tags))
          (tag-str (mapconcat #'identity tag-list ","))
          (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
-         (keywords (delete-dups (sort (mapcan (lambda (t) (split-string (replace-regexp-in-string "@" " " t) " " t)) tag-list) #'string<)))
+         (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
          (keyword-str (mapconcat #'identity keywords ",")))
     (transmute-do-batch (transmute-get-targets)
       (message "Tagging %s with %s" file tag-str)
@@ -403,7 +549,10 @@ TAGS is a comma-separated string or list of tags."
   (transmute-do-batch (transmute-get-targets)
     (let* ((parsed (transmute--parse-filename file))
            (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".mp3")))
-      (transmute--run-command "ffmpeg" "-hide_banner" "-loglevel" "warning" "-stats" "-y" "-i" file "-b:a" "192k" dst))))
+      (transmute--run-command-async (file-name-nondirectory file)
+                                      (format "ffmpeg -hide_banner -loglevel warning -stats -y -i %s -b:a 192k %s"
+                                              (shell-quote-argument file)
+                                              (shell-quote-argument (expand-file-name dst)))))))
 
 ;;;###autoload
 (defun transmute-audio-info ()
@@ -441,7 +590,9 @@ TAGS is a comma-separated string or list of tags."
   "Update FileModifyDate and DateTimeOriginal from CreateDate."
   (interactive)
   (transmute-do-batch (transmute-get-targets)
-    (transmute--run-command "exiftool" "-overwrite_original" "-FileModifyDate<CreateDate" "-DateTimeOriginal<CreateDate" file)))
+    (transmute--run-command-async (file-name-nondirectory file)
+                                    (format "exiftool -overwrite_original \"-FileModifyDate<CreateDate\" \"-DateTimeOriginal<CreateDate\" %s"
+                                            (shell-quote-argument file)))))
 
 ;;;###autoload
 (defun transmute-picture-tag-rename ()
@@ -449,7 +600,6 @@ TAGS is a comma-separated string or list of tags."
   (interactive)
   (transmute-do-batch (transmute-get-targets)
     (let* ((date-info (transmute-get-date file))
-           (prop (car date-info))
            (val (cadr date-info))
            (tags-out (shell-command-to-string (format "exiftool -s3 -TagsList %s" (shell-quote-argument file))))
            (tags (string-trim tags-out)))
@@ -498,7 +648,10 @@ TAGS is a comma-separated string or list of tags."
   (transmute-do-batch (transmute-get-targets)
     (let* ((parsed (transmute--parse-filename file))
            (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-norm." (cdr (assoc 'extension parsed)))))
-      (transmute--run-command "sox" "--norm=0" file dst))))
+      (transmute--run-command-async (file-name-nondirectory file)
+                                      (format "sox --norm=0 %s %s"
+                                              (shell-quote-argument file)
+                                              (shell-quote-argument (expand-file-name dst)))))))
 
 ;;;###autoload
 (defun transmute-audio-trim-silence ()
@@ -507,9 +660,10 @@ TAGS is a comma-separated string or list of tags."
   (transmute-do-batch (transmute-get-targets)
     (let* ((parsed (transmute--parse-filename file))
            (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-trim.mp3")))
-      (transmute--run-command "ffmpeg" "-hide_banner" "-loglevel" "warning" "-stats" "-y" "-i" file
-                                "-af" "silenceremove=start_periods=1:start_duration=1:start_threshold=-60dB:detection=peak,aformat=dblp,areverse,silenceremove=start_periods=1:start_duration=1:start_threshold=-60dB:detection=peak,aformat=dblp,areverse"
-                                dst))))
+      (transmute--run-command-async (file-name-nondirectory file)
+                                      (format "ffmpeg -hide_banner -loglevel warning -stats -y -i %s -af silenceremove=start_periods=1:start_duration=1:start_threshold=-60dB:detection=peak,aformat=dblp,areverse,silenceremove=start_periods=1:start_duration=1:start_threshold=-60dB:detection=peak,aformat=dblp,areverse %s"
+                                              (shell-quote-argument file)
+                                              (shell-quote-argument (expand-file-name dst)))))))
 
 ;;;###autoload
 (defun transmute-picture-crop (width height)
@@ -613,7 +767,12 @@ TAGS is a comma-separated string or list of tags."
     ("at" "Trim Silence" transmute-audio-trim-silence)
     ("ai" "Info" transmute-audio-info)]]
   ["Menus"
-   [("m" "Completing Read Menu" transmute-completing-read-menu)]])
+   [("m" "Completing Read Menu" transmute-completing-read-menu)
+    ("L" "Show Log" transmute-show-log)
+    ("S" "Stop Conversions" transmute-stop-conversions)]])
+
+;;;###autoload
+(transmute-progress-mode 1)
 
 (provide 'transmute)
 
