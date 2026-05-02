@@ -27,6 +27,9 @@
 (defvar transmute-active-processes nil
   "List of active transmute processes.")
 
+(defvar transmute-batch-files nil
+  "List of files processed in the current batch.")
+
 (defvar transmute-after-batch-hook nil
   "Hook run after each transmute batch operation completes.
 Useful for refreshing external buffers like image-dired thumbnail views.")
@@ -112,7 +115,8 @@ When nil, fallback completion is used."
                                              new-fmt)))
         (setq transmute-total-tasks 0
               transmute-completed-tasks 0)))
-    (force-mode-line-update t)))
+    (force-mode-line-update t)
+    (redraw-display)))
 
 ;;;###autoload
 (define-minor-mode transmute-progress-mode
@@ -228,7 +232,8 @@ Filters out exiftool warning lines from the output."
           (kill-buffer buf))))
     (when (null transmute-active-processes)
       (setq transmute-total-tasks 0
-            transmute-completed-tasks 0))
+            transmute-completed-tasks 0)
+      (run-hooks 'transmute-after-batch-hook))
     (transmute--update-progress-display)))
 
 (defun transmute--run-command-async (name cmd)
@@ -251,7 +256,8 @@ Filters out exiftool warning lines from the output."
 
 (defun transmute--preserve-metadata (src dst)
   "Copy metadata from SRC to DST and preserve timestamp."
-  (transmute--run-command "exiftool" "-overwrite_original_in_place" "-TagsFromFile" src dst)
+  (transmute--run-command "exiftool" "-overwrite_original_in_place" "-TagsFromFile" src 
+                          "--EXIF:ExifImageWidth" "--EXIF:ExifImageHeight" dst)
   (set-file-times dst (file-attribute-modification-time (file-attributes src))))
 
 (defun transmute--trash (file)
@@ -259,6 +265,11 @@ Filters out exiftool warning lines from the output."
   (if (executable-find transmute-trash-command)
       (transmute--run-command transmute-trash-command file)
     (move-file-to-trash file)))
+
+(defun transmute--exif-cmd (src dst)
+  "Return exiftool command string to copy tags from SRC to DST, excluding image dimensions."
+  (format "exiftool -overwrite_original_in_place -TagsFromFile %s --EXIF:ExifImageWidth --EXIF:ExifImageHeight %s"
+          (shell-quote-argument src) (shell-quote-argument dst)))
 
 ;;; High-level Conversion Helpers
 
@@ -269,25 +280,23 @@ Preserves metadata and moves SRC to trash."
          (dst (expand-file-name dst))
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
          (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
-         (exif-cmd (format "exiftool -overwrite_original_in_place -TagsFromFile %s %s"
-                           (shell-quote-argument src) (shell-quote-argument tmp)))
-         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
-         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
-         (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (trash-cmd (unless (string= src dst)
-                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
-         (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
-    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
+(exif-cmd (transmute--exif-cmd src tmp))
+          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+          (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+          (trash-cmd (unless (string= src dst)
+                       (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-image-copy (src dst &rest magick-args)
   "Convert image SRC to DST using MAGICK-ARGS.
 Preserves metadata, keeps SRC."
   (let* ((src (expand-file-name src))
-         (dst (expand-file-name dst))
-         (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
-         (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
-         (exif-cmd (format "exiftool -overwrite_original_in_place -TagsFromFile %s %s"
-                           (shell-quote-argument src) (shell-quote-argument tmp)))
+          (dst (expand-file-name dst))
+          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
+          (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
+          (exif-cmd (transmute--exif-cmd src tmp))
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
          (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
@@ -317,15 +326,14 @@ Preserves metadata and moves SRC to trash."
          (dst (expand-file-name dst))
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
          (gan-cmd (mapconcat #'shell-quote-argument (append (list "realesrgan-ncnn-vulkan") gan-args (list "-i" src "-o" tmp)) " "))
-         (exif-cmd (format "exiftool -overwrite_original_in_place -TagsFromFile %s %s"
-                           (shell-quote-argument src) (shell-quote-argument tmp)))
-         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
-         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
-         (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (trash-cmd (unless (string= src dst)
-                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
-         (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
-    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
+(exif-cmd (transmute--exif-cmd src tmp))
+          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+          (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+          (trash-cmd (unless (string= src dst)
+                       (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+          (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 ;;; Batch / Dired Integration
 
@@ -372,12 +380,11 @@ Otherwise ask for file."
 After processing all files, run `transmute-after-batch-hook'."
   (declare (indent 1))
   `(let ((batch-files ,files))
-     (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files)))
-     (transmute--update-progress-display)
+     (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files))
+           transmute-batch-files batch-files)
      (dolist (file batch-files)
        (let ((default-directory (file-name-directory file)))
-         ,@body))
-     (run-hooks 'transmute-after-batch-hook)))
+         ,@body))))
 
 ;;; Specific Commands
 
@@ -1007,29 +1014,46 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 (defun transmute-refresh-thumbnail ()
   "Refresh dired and thumbnail buffers after a transmute batch operation.
 Re-scans the source directory to pick up renamed files, then refreshes."
-  (when (derived-mode-p 'image-dired-thumbnail-mode)
-    (when (and (boundp 'dired-image-thumbnail--dired-buffer)
-               (buffer-live-p dired-image-thumbnail--dired-buffer))
-      (with-current-buffer dired-image-thumbnail--dired-buffer
-        (revert-buffer)))
-    (when (and (boundp 'dired-image-thumbnail--source-dir)
-               dired-image-thumbnail--source-dir
-               (fboundp 'dired-image-thumbnail--find-images))
-      (setq dired-image-thumbnail--all-images
-            (dired-image-thumbnail--find-images
-             dired-image-thumbnail--source-dir
-             (and (boundp 'dired-image-thumbnail--recursive)
-                  dired-image-thumbnail--recursive))))
-    (when (fboundp 'dired-image-thumbnail-refresh)
-      (dired-image-thumbnail-refresh))))
+  (let ((files transmute-batch-files))
+    (run-at-time 0.5 nil
+      (lambda ()
+        (clear-image-cache)
+        (dolist (f files)
+          (when (and (boundp 'image-dired-dir)
+                     (fboundp 'image-dired-thumb-name))
+            (let ((thumb (image-dired-thumb-name f)))
+              (when (file-exists-p thumb)
+                (delete-file thumb)))))
+        (dolist (buf (buffer-list))
+          (with-current-buffer buf
+            (when (derived-mode-p 'dired-mode)
+              (revert-buffer nil t))))
+        (dolist (buf (buffer-list))
+          (with-current-buffer buf
+            (when (derived-mode-p 'image-dired-thumbnail-mode)
+              (when (and (boundp 'dired-image-thumbnail--dired-buffer)
+                         (buffer-live-p dired-image-thumbnail--dired-buffer))
+                (with-current-buffer dired-image-thumbnail--dired-buffer
+                  (revert-buffer nil t)))
+              (when (and (boundp 'dired-image-thumbnail--source-dir)
+                         dired-image-thumbnail--source-dir
+                         (fboundp 'dired-image-thumbnail--find-images))
+                (setq dired-image-thumbnail--all-images
+                      (dired-image-thumbnail--find-images
+                       dired-image-thumbnail--source-dir
+                       (and (boundp 'dired-image-thumbnail--recursive)
+                            dired-image-thumbnail--recursive))))
+              (when (fboundp 'dired-image-thumbnail-refresh)
+                (dired-image-thumbnail-refresh)))))))))
+
+(add-hook 'transmute-after-batch-hook #'transmute-refresh-thumbnail)
 
 ;;;###autoload
 (defun transmute-setup-thumbnail-keys ()
   "Bind `transmute-menu' to C-c M in `image-dired-thumbnail-mode-map'.
 Call this in your init file after loading both packages."
   (when (boundp 'image-dired-thumbnail-mode-map)
-    (define-key image-dired-thumbnail-mode-map (kbd "C-c M") #'transmute-menu))
-  (add-hook 'transmute-after-batch-hook #'transmute-refresh-thumbnail))
+    (define-key image-dired-thumbnail-mode-map (kbd "C-c M") #'transmute-menu)))
 
 (provide 'transmute)
 
