@@ -29,6 +29,12 @@
 (defvar transmute-completed-tasks 0
   "Number of completed tasks in the current batch.")
 
+(defcustom transmute-tag-list-file "/home/jdyer/bin/category-list-uniq.txt"
+  "Path to a file of known tags, one per line, for `transmute-tag-from-list'.
+When nil, fallback completion is used."
+  :type '(choice (file :tag "Tag list file") (const :tag "None" nil))
+  :group 'transmute)
+
 (defvar transmute-log-buffer-name "*transmute-log*"
   "Name of the buffer for transmute conversion output.")
 
@@ -166,7 +172,8 @@ no-tag, timestamp, label, tags-raw, tags, keywords."
 
 (defun transmute-get-date (file)
   "Get creation date from FILE using exiftool.
-Tries CreateDate, DateTimeOriginal, ModifyDate, and FileModifyDate."
+Tries CreateDate, DateTimeOriginal, ModifyDate, and FileModifyDate.
+Filters out exiftool warning lines from the output."
   (let ((props '("CreateDate" "DateTimeOriginal" "ModifyDate" "FileModifyDate"))
         (result nil))
     (cl-loop for prop in props
@@ -174,7 +181,9 @@ Tries CreateDate, DateTimeOriginal, ModifyDate, and FileModifyDate."
              do (let ((val (shell-command-to-string
                             (format "exiftool -s3 -%s %s"
                                     prop (shell-quote-argument (expand-file-name file))))))
-                  (setq val (string-trim val))
+                  (setq val (string-trim
+                              (replace-regexp-in-string
+                               "^Warning:.*\n\\|Warning:.*$" "" val)))
                   (unless (string-empty-p val)
                     (setq result (list prop val)))))
     result))
@@ -557,6 +566,37 @@ TAGS is a comma-separated string or list of tags."
                                   (format "-Keywords=%s" keyword-str)
                                   file)))))
 
+(defun transmute--known-tags ()
+  "Return a list of known tags from `transmute-tag-list-file'."
+  (when (and transmute-tag-list-file
+             (file-readable-p transmute-tag-list-file))
+    (with-temp-buffer
+      (insert-file-contents transmute-tag-list-file)
+      (split-string (buffer-string) "\n" t))))
+
+;;;###autoload
+(defun transmute-tag-from-list (tags)
+  "Interactively tag selected media files from a list of known tags.
+TAGS is a comma-separated string or list of tags selected via
+`completing-read-multiple' against the tag list file."
+  (interactive (list (completing-read-multiple "Tags: " (transmute--known-tags))))
+  (when-let ((targets (transmute-get-filtered-targets 'any)))
+    (let* ((tag-list (if (stringp tags) (split-string tags "," t) tags))
+           (tag-str (mapconcat #'identity tag-list ","))
+           (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
+           (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
+           (keyword-str (mapconcat #'identity keywords ",")))
+      (transmute-do-batch targets
+        (message "Tagging %s with %s" file tag-str)
+        (transmute--run-command "exiftool" "-overwrite_original_in_place"
+                                  (format "-TagsList=%s" hier-tag-str)
+                                  (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
+                                  (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
+                                  (format "-XPKeywords=%s" keyword-str)
+                                  (format "-Subject=%s" keyword-str)
+                                  (format "-Keywords=%s" keyword-str)
+                                  file)))))
+
 ;;;###autoload
 (defun transmute-retag-by-date ()
   "Rename images based on EXIF creation date."
@@ -682,6 +722,61 @@ TAGS is a comma-separated string or list of tags."
               (rename-file file final-name))))))))
 
 ;;;###autoload
+(defun transmute-tag-and-rename (tags)
+  "Tag selected media files from known tags, then rename based on tags and date.
+TAGS is selected via `completing-read-multiple' against the tag list file.
+After writing metadata, each file is renamed to the
+YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
+  (interactive (list (completing-read-multiple "Tags: " (transmute--known-tags))))
+  (when-let ((targets (transmute-get-filtered-targets 'any)))
+    (let* ((tag-list (if (stringp tags) (split-string tags "," t) tags))
+           (tag-str (mapconcat #'identity tag-list ","))
+           (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
+           (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
+           (keyword-str (mapconcat #'identity keywords ","))
+           (formatted-tags (replace-regexp-in-string "/" "@" (replace-regexp-in-string "," "-" hier-tag-str))))
+      (transmute-do-batch targets
+        (message "Tagging %s with %s" file tag-str)
+        (transmute--run-command "exiftool" "-overwrite_original_in_place"
+                                  (format "-TagsList=%s" hier-tag-str)
+                                  (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
+                                  (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
+                                  (format "-XPKeywords=%s" keyword-str)
+                                  (format "-Subject=%s" keyword-str)
+                                  (format "-Keywords=%s" keyword-str)
+                                  file)
+        (let* ((date-info (transmute-get-date file))
+               (val (cadr date-info)))
+          (when date-info
+            (let* ((formatted-date (transmute-format-date val))
+                   (parsed (transmute--parse-filename file))
+                   (label (cdr (assoc 'label parsed)))
+                   (ext (cdr (assoc 'extension parsed)))
+                   (basedir (cdr (assoc 'directory parsed)))
+                   (new-base (format "%s--%s" formatted-date label))
+                   (new-name (format "%s/%s__%s.%s" basedir new-base formatted-tags ext))
+                   (final-name new-name)
+                   (counter 1))
+              (while (file-exists-p final-name)
+                (setq final-name (format "%s/%s%d__%s.%s" basedir new-base counter formatted-tags ext))
+                (cl-incf counter))
+              (unless (string= (expand-file-name final-name) (expand-file-name file))
+                (message "%s -> %s" file final-name)
+                (rename-file file final-name)))))))))
+
+;;;###autoload
+(defun transmute-clear-tags ()
+  "Remove all tags from selected media files."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'any)))
+    (transmute-do-batch targets
+      (message "Clearing tags from %s" file)
+      (transmute--run-command "exiftool" "-overwrite_original_in_place"
+                                "-TagsList=" "-XMP-microsoft:LastKeywordXMP="
+                                "-HierarchicalSubject=" "-XPKeywords="
+                                "-Subject=" "-Keywords=" file))))
+
+;;;###autoload
 (defun transmute-video-speed-up ()
   "Speed up video 2x (removes audio)."
   (interactive)
@@ -768,8 +863,11 @@ TAGS is a comma-separated string or list of tags."
                      ("Picture Get Text (OCR)" . transmute-picture-get-text)
                      ("Picture To PDF" . transmute-picture-to-pdf)
                      ("Picture Tag (Interactive)" . transmute-tag-interactive)
+                     ("Picture Tag from List" . transmute-tag-from-list)
+                     ("Picture Tag and Rename" . transmute-tag-and-rename)
                      ("Picture Tag Rename" . transmute-picture-tag-rename)
                      ("Picture Retag by Date" . transmute-retag-by-date)
+                     ("Picture Clear Tags" . transmute-clear-tags)
                      ("Picture Info" . transmute-picture-info)
                      ("Video Convert" . transmute-video-convert)
                      ("Video Shrink" . transmute-video-shrink)
@@ -796,23 +894,26 @@ TAGS is a comma-separated string or list of tags."
 ;;;###autoload
 (transient-define-prefix transmute-menu ()
   "Main menu for media management utilities."
-  ["Image Commands"
-   [("ic" "Convert" transmute-picture-convert)
-    ("iz" "Crush (640px)" transmute-picture-crush)
-    ("is" "Scale (1920px)" transmute-picture-scale)
-    ("iu" "Upscale (GAN)" transmute-picture-upscale)]
-   [("ir" "Rotate Right" transmute-picture-rotate-right)
-    ("il" "Rotate Left" transmute-picture-rotate-left)
-    ("ib" "Brighten" transmute-picture-correct)
-    ("ia" "Auto Colour" transmute-picture-autocolour)]
-   [("it" "Tag (Interactive)" transmute-tag-interactive)
-    ("in" "Tag Rename" transmute-picture-tag-rename)
-    ("id" "Retag by Date" transmute-retag-by-date)
-    ("if" "Update from CreateDate" transmute-picture-update-from-create-date)]
-   [("ip" "To PDF" transmute-picture-to-pdf)
-    ("io" "OCR (Get Text)" transmute-picture-get-text)
-    ("iC" "Crop" transmute-picture-crop)
-    ("ii" "Info" transmute-picture-info)]]
+["Image Commands"
+    [("ic" "Convert" transmute-picture-convert)
+     ("iz" "Crush (640px)" transmute-picture-crush)
+     ("is" "Scale (1920px)" transmute-picture-scale)
+     ("iu" "Upscale (GAN)" transmute-picture-upscale)]
+    [("ir" "Rotate Right" transmute-picture-rotate-right)
+     ("il" "Rotate Left" transmute-picture-rotate-left)
+     ("ib" "Brighten" transmute-picture-correct)
+     ("ia" "Auto Colour" transmute-picture-autocolour)]
+    [("if" "Update from CreateDate" transmute-picture-update-from-create-date)
+     ("ip" "To PDF" transmute-picture-to-pdf)
+     ("iC" "Crop" transmute-picture-crop)
+     ("ii" "Info" transmute-picture-info)]]
+  ["Tag Commands"
+    [("tt" "Tag (Interactive)" transmute-tag-interactive)
+     ("tk" "Tag from List" transmute-tag-from-list)
+     ("tK" "Tag & Rename" transmute-tag-and-rename)
+     ("tn" "Tag Rename" transmute-picture-tag-rename)
+     ("td" "Retag by Date" transmute-retag-by-date)
+     ("tc" "Clear Tags" transmute-clear-tags)]]
   ["Video Commands"
    [("vc" "Convert" transmute-video-convert)
     ("vs" "Shrink" transmute-video-shrink)
