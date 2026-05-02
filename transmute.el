@@ -51,6 +51,36 @@ When nil, fallback completion is used."
 (defvar transmute-log-buffer-name "*transmute-log*"
   "Name of the buffer for transmute conversion output.")
 
+(defvar transmute-info-buffer-name "*transmute-info*"
+  "Name of the buffer for transmute metadata output.")
+
+(define-derived-mode transmute-info-mode special-mode "Transmute-Info"
+  "Major mode for viewing media metadata."
+  (setq-local font-lock-defaults
+              '((("^File:.*" . 'bold)
+                 ("^----.*----$" . 'font-lock-function-name-face)
+                 ("^\\s-*\\(.+?\\)\\s-*:" . (1 'font-lock-variable-name-face))))))
+
+(defun transmute--display-info (targets &rest commands)
+  "Run COMMANDS for each of TARGETS and display in a dedicated buffer.
+COMMANDS can be a list of strings or (label . cmd) pairs."
+  (let ((buf (get-buffer-create transmute-info-buffer-name)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (transmute-info-mode)
+        (dolist (file targets)
+          (insert (propertize (format "File: %s\n" file) 'face 'bold))
+          (dolist (cmd-spec commands)
+            (let ((label (if (listp cmd-spec) (car cmd-spec) nil))
+                  (cmd (if (listp cmd-spec) (cdr cmd-spec) cmd-spec)))
+              (when label
+                (insert (propertize (format "[%s]\n" label) 'face 'font-lock-comment-face)))
+              (insert (shell-command-to-string (format "%s %s 2>&1" cmd (shell-quote-argument file))))))
+          (insert "\n" (make-string (window-width) ?=) "\n\n"))
+        (goto-char (point-min))))
+    (pop-to-buffer buf)))
+
 (defun transmute-show-log ()
   "Show the transmute log buffer."
   (interactive)
@@ -702,25 +732,23 @@ TAGS is a comma-separated string or list of tags selected via
   "Show audio ID3 tags."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'audio)))
-    (transmute-do-batch targets
-      (transmute--run-command "id3v2" "-l" file))))
+    (transmute--display-info targets "id3v2 -l")))
 
 ;;;###autoload
 (defun transmute-picture-info ()
   "Show image metadata."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'image)))
-    (transmute-do-batch targets
-      (transmute--run-command "exiftool" "-g" file))))
+    (transmute--display-info targets "exiftool -g")))
 
 ;;;###autoload
 (defun transmute-video-info ()
   "Show video info using ffprobe and exiftool."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'video)))
-    (transmute-do-batch targets
-      (transmute--run-command "ffprobe" file)
-      (transmute--run-command "exiftool" file))))
+    (transmute--display-info targets 
+                             '("FFProbe" . "ffprobe -hide_banner")
+                             '("ExifTool" . "exiftool"))))
 
 ;;;###autoload
 (defun transmute-video-to-gif ()
@@ -836,35 +864,8 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 (defun transmute-tag-info ()
   "Show tags and key metadata for selected media files in a summary buffer."
   (interactive)
-  (let ((targets (transmute-get-filtered-targets 'any)))
-    (when targets
-      (with-current-buffer (get-buffer-create "*transmute-info*")
-        (read-only-mode -1)
-        (erase-buffer)
-        (dolist (file targets)
-          (let* ((tags-list (or (transmute--exif-field file "TagsList") ""))
-                 (hier-subj (or (transmute--exif-field file "HierarchicalSubject") ""))
-                 (keywords (or (transmute--exif-field file "Keywords") ""))
-                 (subject (or (transmute--exif-field file "Subject") ""))
-                 (create-date (or (transmute--exif-field file "CreateDate") ""))
-                 (date-orig (or (transmute--exif-field file "DateTimeOriginal") ""))
-                 (mod-date (or (transmute--exif-field file "FileModifyDate") ""))
-                 (dims (or (transmute--exif-field file "ImageSize") ""))
-                 (file-type (or (transmute--exif-field file "MIMEType") "")))
-            (insert (propertize (file-name-nondirectory file) 'face '(:weight bold :underline t)))
-            (newline)
-            (insert (format "  Tags:                %s\n" tags-list))
-            (insert (format "  HierarchicalSubject: %s\n" hier-subj))
-            (insert (format "  Keywords:            %s\n" keywords))
-            (insert (format "  Subject:             %s\n" subject))
-            (insert (format "  CreateDate:          %s\n" create-date))
-            (insert (format "  DateTimeOriginal:    %s\n" date-orig))
-            (insert (format "  FileModifyDate:      %s\n" mod-date))
-            (insert (format "  Size:                %s\n" dims))
-            (insert (format "  Type:                %s\n" file-type))
-            (newline))))
-        (read-only-mode 1))
-      (pop-to-buffer "*transmute-info*")))
+  (when-let ((targets (transmute-get-filtered-targets 'any)))
+    (transmute--display-info targets "exiftool -TagsList -HierarchicalSubject -Keywords -Subject -CreateDate -DateTimeOriginal -FileModifyDate -ImageSize -MIMEType")))
 
 ;;;###autoload
 (defun transmute-video-speed-up ()
@@ -985,48 +986,50 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 ;;;###autoload
 (transient-define-prefix transmute-menu ()
   "Main menu for media management utilities."
-["Image Commands"
-    [("ic" "Convert" transmute-picture-convert)
-     ("iz" "Crush (640px)" transmute-picture-crush)
-     ("is" "Scale (1920px)" transmute-picture-scale)
-     ("iu" "Upscale (GAN)" transmute-picture-upscale)]
-    [("ir" "Rotate Right" transmute-picture-rotate-right)
-     ("il" "Rotate Left" transmute-picture-rotate-left)
-     ("ib" "Brighten" transmute-picture-correct)
-     ("ia" "Auto Colour" transmute-picture-autocolour)]
-    [("if" "Update from CreateDate" transmute-picture-update-from-create-date)
-     ("ip" "To PDF" transmute-picture-to-pdf)
-     ("iC" "Crop" transmute-picture-crop)
-     ("ii" "Info" transmute-picture-info)]]
-  ["Tag Commands"
-    [("tt" "Tag (Interactive)" transmute-tag-interactive)
-     ("tk" "Tag from List" transmute-tag-from-list)
-     ("tK" "Tag & Rename" transmute-tag-and-rename)
-     ("tn" "Tag Rename" transmute-picture-tag-rename)
-     ("td" "Retag by Date" transmute-retag-by-date)
-     ("tc" "Clear Tags" transmute-clear-tags)
-     ("ti" "Tag Info" transmute-tag-info)]]
-  ["Video Commands"
-   [("vc" "Convert" transmute-video-convert)
+  ["Media Processing"
+   ["Image"
+    ("ic" "Convert" transmute-picture-convert)
+    ("iz" "Crush (640px)" transmute-picture-crush)
+    ("is" "Scale (1920px)" transmute-picture-scale)
+    ("iu" "Upscale (GAN)" transmute-picture-upscale)
+    ("ir" "Rotate Right" transmute-picture-rotate-right)
+    ("il" "Rotate Left" transmute-picture-rotate-left)
+    ("ib" "Brighten" transmute-picture-correct)
+    ("ia" "Auto Colour" transmute-picture-autocolour)
+    ("if" "Update from CreateDate" transmute-picture-update-from-create-date)
+    ("ip" "To PDF" transmute-picture-to-pdf)
+    ("iC" "Crop" transmute-picture-crop)
+    ("ii" "Info" transmute-picture-info)]
+   ["Video"
+    ("vc" "Convert" transmute-video-convert)
     ("vs" "Shrink" transmute-video-shrink)
     ("vg" "To GIF" transmute-video-to-gif)
-    ("va" "Extract Audio" transmute-video-extract-audio)]
-   [("vt" "Top/Tail (Trim)" transmute-video-toptail)
+    ("va" "Extract Audio" transmute-video-extract-audio)
+    ("vt" "Top/Tail (Trim)" transmute-video-toptail)
     ("vk" "Cut" transmute-video-cut)
     ("vr" "Reverse" transmute-video-reverse)
     ("vR" "Rotate Right" transmute-video-rotate-right)
-    ("vL" "Rotate Left" transmute-video-rotate-left)]
-   [("v+" "Speed Up" transmute-video-speed-up)
+    ("vL" "Rotate Left" transmute-video-rotate-left)
+    ("v+" "Speed Up" transmute-video-speed-up)
     ("v-" "Slow Down" transmute-video-slow-down)
     ("vx" "Remove Audio" transmute-video-remove-audio)
     ("vi" "Info" transmute-video-info)]]
-  ["Audio Commands"
-   [("ac" "Convert" transmute-audio-convert)
+  ["Metadata & Utilities"
+   ["Tags"
+    ("tt" "Tag (Interactive)" transmute-tag-interactive)
+    ("tk" "Tag from List" transmute-tag-from-list)
+    ("tK" "Tag & Rename" transmute-tag-and-rename)
+    ("tn" "Tag Rename" transmute-picture-tag-rename)
+    ("td" "Retag by Date" transmute-retag-by-date)
+    ("tc" "Clear Tags" transmute-clear-tags)
+    ("ti" "Tag Info" transmute-tag-info)]
+   ["Audio"
+    ("ac" "Convert" transmute-audio-convert)
     ("an" "Normalise" transmute-audio-normalise)
     ("at" "Trim Silence" transmute-audio-trim-silence)
-    ("ai" "Info" transmute-audio-info)]]
-  ["Menus"
-   [("m" "Completing Read Menu" transmute-completing-read-menu)
+    ("ai" "Info" transmute-audio-info)]
+   ["Menus"
+    ("m" "Completing Read Menu" transmute-completing-read-menu)
     ("L" "Show Log" transmute-show-log)
     ("S" "Stop Conversions" transmute-stop-conversions)]])
 
