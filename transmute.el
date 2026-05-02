@@ -32,6 +32,9 @@
 (defvar transmute-batch-files nil
   "List of files processed in the current batch.")
 
+(defvar transmute--last-renames nil
+  "Alist mapping old filenames to new filenames from the last batch.")
+
 (defvar transmute-after-batch-hook nil
   "Hook run after each transmute batch operation completes.
 Useful for refreshing external buffers like image-dired thumbnail views.")
@@ -428,15 +431,27 @@ Otherwise ask for file."
       files)))
 
 (defmacro transmute-do-batch (files &rest body)
-  "Run BODY for each file in FILES, binding \='file\=' to current file.
-After processing all files, run `transmute-after-batch-hook'."
+  "Run BODY for each file in FILES, binding 'file' to current file.
+After processing all files, run `transmute-after-batch-hook' if no
+asynchronous processes are active."
   (declare (indent 1))
   `(let ((batch-files ,files))
+     (setq transmute--last-renames nil)
      (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files))
            transmute-batch-files batch-files)
      (dolist (file batch-files)
        (let ((default-directory (file-name-directory file)))
-         ,@body))))
+         ,@body
+         ;; If this task was purely synchronous, increment completed count now
+         (when (null transmute-active-processes)
+           (setq transmute-completed-tasks (1+ transmute-completed-tasks))
+           (transmute--update-progress-display))))
+     ;; If after processing all files no asynchronous tasks are pending,
+     ;; run the refresh hook immediately.
+     (when (null transmute-active-processes)
+       (setq transmute-total-tasks 0
+             transmute-completed-tasks 0)
+       (run-hooks 'transmute-after-batch-hook))))
 
 ;;; Specific Commands
 
@@ -636,7 +651,7 @@ TAGS is a comma-separated string or list of tags."
            (keyword-str (mapconcat #'identity keywords ",")))
       (transmute-do-batch targets
         (message "Tagging %s with %s" file tag-str)
-        (transmute--run-command "exiftool" "-overwrite_original_in_place"
+        (transmute--run-command "exiftool" "-P" "-overwrite_original_in_place"
                                   (format "-TagsList=%s" hier-tag-str)
                                   (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
                                   (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
@@ -667,7 +682,7 @@ TAGS is a comma-separated string or list of tags selected via
            (keyword-str (mapconcat #'identity keywords ",")))
       (transmute-do-batch targets
         (message "Tagging %s with %s" file tag-str)
-        (transmute--run-command "exiftool" "-overwrite_original_in_place"
+        (transmute--run-command "exiftool" "-P" "-overwrite_original_in_place"
                                   (format "-TagsList=%s" hier-tag-str)
                                   (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
                                   (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
@@ -688,7 +703,7 @@ TAGS is a comma-separated string or list of tags selected via
         (when date-info
           (when (member prop '("FileModifyDate" "ModifyDate"))
             (message "Writing %s to CreateDate and DateTimeOriginal for %s" prop file)
-            (shell-command (format "exiftool -all= -overwrite_original_in_place \"-CreateDate<%s\" \"-DateTimeOriginal<%s\" %s"
+            (shell-command (format "exiftool -P -all= -overwrite_original_in_place \"-CreateDate<%s\" \"-DateTimeOriginal<%s\" %s"
                                    prop prop (shell-quote-argument file))))
           (let* ((formatted-date (transmute-format-date val))
                  (parsed (transmute--parse-filename file))
@@ -767,7 +782,7 @@ TAGS is a comma-separated string or list of tags selected via
   (when-let ((targets (transmute-get-filtered-targets 'any)))
     (transmute-do-batch targets
       (transmute--run-command-async (file-name-nondirectory file)
-                                      (format "exiftool -overwrite_original \"-FileModifyDate<CreateDate\" \"-DateTimeOriginal<CreateDate\" %s"
+                                      (format "exiftool -P -overwrite_original \"-FileModifyDate<CreateDate\" \"-DateTimeOriginal<CreateDate\" %s"
                                               (shell-quote-argument file))))))
 
 ;;;###autoload
@@ -794,9 +809,12 @@ TAGS is a comma-separated string or list of tags selected via
             (while (file-exists-p final-name)
               (setq final-name (format "%s/%s%d__%s.%s" basedir new-base counter formatted-tags ext))
               (cl-incf counter))
-            (unless (string= (expand-file-name final-name) (expand-file-name file))
-              (message "%s -> %s" file final-name)
-              (rename-file file final-name))))))))
+            (let ((abs-final (expand-file-name final-name basedir))
+                  (abs-orig (expand-file-name file)))
+              (unless (string= abs-final abs-orig)
+                (message "%s -> %s" abs-orig abs-final)
+                (setq transmute--last-renames (cons (cons abs-orig abs-final) transmute--last-renames))
+                (rename-file abs-orig abs-final)))))))))
 
 ;;;###autoload
 (defun transmute-tag-and-rename (tags)
@@ -814,7 +832,7 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
            (formatted-tags (replace-regexp-in-string "/" "@" (replace-regexp-in-string "," "-" hier-tag-str))))
       (transmute-do-batch targets
         (message "Tagging %s with %s" file tag-str)
-        (transmute--run-command "exiftool" "-overwrite_original_in_place"
+        (transmute--run-command "exiftool" "-P" "-overwrite_original_in_place"
                                   (format "-TagsList=%s" hier-tag-str)
                                   (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
                                   (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
@@ -837,9 +855,12 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
               (while (file-exists-p final-name)
                 (setq final-name (format "%s/%s%d__%s.%s" basedir new-base counter formatted-tags ext))
                 (cl-incf counter))
-              (unless (string= (expand-file-name final-name) (expand-file-name file))
-                (message "%s -> %s" file final-name)
-                (rename-file file final-name)))))))))
+              (let ((abs-final (expand-file-name final-name basedir))
+                    (abs-orig (expand-file-name file)))
+                (unless (string= abs-final abs-orig)
+                  (message "%s -> %s" abs-orig abs-final)
+                  (setq transmute--last-renames (cons (cons abs-orig abs-final) transmute--last-renames))
+                  (rename-file abs-orig abs-final))))))))))
 
 ;;;###autoload
 (defun transmute-clear-tags ()
@@ -848,7 +869,7 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
   (when-let ((targets (transmute-get-filtered-targets 'any)))
     (transmute-do-batch targets
       (message "Clearing tags from %s" file)
-      (transmute--run-command "exiftool" "-overwrite_original_in_place"
+      (transmute--run-command "exiftool" "-P" "-overwrite_original_in_place"
                                 "-TagsList=" "-XMP-microsoft:LastKeywordXMP="
                                 "-HierarchicalSubject=" "-XPKeywords="
                                 "-Subject=" "-Keywords=" file))))
@@ -1055,30 +1076,32 @@ Re-scans the source directory to pick up renamed files, then refreshes."
           (with-current-buffer buf
             (when (derived-mode-p 'dired-mode)
               (revert-buffer nil t))))
-        (dolist (buf (buffer-list))
-          (with-current-buffer buf
-            (when (derived-mode-p 'image-dired-thumbnail-mode)
-              (when (and (boundp 'dired-image-thumbnail--dired-buffer)
-                         (buffer-live-p dired-image-thumbnail--dired-buffer))
-                (with-current-buffer dired-image-thumbnail--dired-buffer
-                  (revert-buffer nil t)))
-              ;; Clear dimension cache so header line shows updated sizes
-              (when (bound-and-true-p dired-image-thumbnail--dimension-cache)
-                (clrhash dired-image-thumbnail--dimension-cache))
-              (when (bound-and-true-p dired-image-thumbnail--dimension-pending)
-                (clrhash dired-image-thumbnail--dimension-pending))
-              (when (and (boundp 'dired-image-thumbnail--source-dir)
+        (if (fboundp 'dired-image-thumbnail-refresh-all)
+            (dired-image-thumbnail-refresh-all transmute--last-renames)
+          (dolist (buf (buffer-list))
+            (with-current-buffer buf
+              (when (derived-mode-p 'image-dired-thumbnail-mode)
+                (when (and (boundp 'dired-image-thumbnail--dired-buffer)
+                           (buffer-live-p dired-image-thumbnail--dired-buffer))
+                  (with-current-buffer dired-image-thumbnail--dired-buffer
+                    (revert-buffer nil t)))
+                ;; Clear dimension cache so header line shows updated sizes
+                (when (bound-and-true-p dired-image-thumbnail--dimension-cache)
+                  (clrhash dired-image-thumbnail--dimension-cache))
+                (when (bound-and-true-p dired-image-thumbnail--dimension-pending)
+                  (clrhash dired-image-thumbnail--dimension-pending))
+                (when (and (boundp 'dired-image-thumbnail--source-dir)
+                           dired-image-thumbnail--source-dir
+                           (fboundp 'dired-image-thumbnail--find-images))
+                  (setq dired-image-thumbnail--all-images
+                        (dired-image-thumbnail--find-images
                          dired-image-thumbnail--source-dir
-                         (fboundp 'dired-image-thumbnail--find-images))
-                (setq dired-image-thumbnail--all-images
-                      (dired-image-thumbnail--find-images
-                       dired-image-thumbnail--source-dir
-                       (and (boundp 'dired-image-thumbnail--recursive)
-                            dired-image-thumbnail--recursive))))
-              (when (fboundp 'dired-image-thumbnail-refresh)
-                (dired-image-thumbnail-refresh))
-              (when (fboundp 'dired-image-thumbnail-refresh-current-display)
-                (dired-image-thumbnail-refresh-current-display)))))))))
+                         (and (boundp 'dired-image-thumbnail--recursive)
+                              dired-image-thumbnail--recursive))))
+                (when (fboundp 'dired-image-thumbnail-refresh)
+                  (dired-image-thumbnail-refresh))))))
+        (when (fboundp 'dired-image-thumbnail-refresh-current-display)
+          (dired-image-thumbnail-refresh-current-display))))))
 
 (add-hook 'transmute-after-batch-hook #'transmute-refresh-thumbnail)
 
