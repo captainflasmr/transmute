@@ -18,6 +18,8 @@
 
 (declare-function dired-image-thumbnail-get-marked "dired-image-thumbnail")
 (declare-function dired-image-thumbnail--nearest-image-original-file-name "dired-image-thumbnail")
+(declare-function dired-image-thumbnail-clear-preview-cache "dired-image-thumbnail")
+(declare-function dired-image-thumbnail-refresh-current-display "dired-image-thumbnail")
 (defvar image-dired-thumbnail-mode-map)
 
 (defgroup transmute nil
@@ -1038,6 +1040,8 @@ Re-scans the source directory to pick up renamed files, then refreshes."
     (run-at-time 0.5 nil
       (lambda ()
         (clear-image-cache)
+        (when (fboundp 'dired-image-thumbnail-clear-preview-cache)
+          (dired-image-thumbnail-clear-preview-cache))
         (dolist (f files)
           (when (and (boundp 'image-dired-dir)
                      (fboundp 'image-dired-thumb-name))
@@ -1069,7 +1073,9 @@ Re-scans the source directory to pick up renamed files, then refreshes."
                        (and (boundp 'dired-image-thumbnail--recursive)
                             dired-image-thumbnail--recursive))))
               (when (fboundp 'dired-image-thumbnail-refresh)
-                (dired-image-thumbnail-refresh)))))))))
+                (dired-image-thumbnail-refresh))
+              (when (fboundp 'dired-image-thumbnail-refresh-current-display)
+                (dired-image-thumbnail-refresh-current-display)))))))))
 
 (add-hook 'transmute-after-batch-hook #'transmute-refresh-thumbnail)
 
