@@ -255,10 +255,12 @@ Filters out exiftool warning lines from the output."
     (shell-command full-cmd)))
 
 (defun transmute--preserve-metadata (src dst)
-  "Copy metadata from SRC to DST and preserve timestamp."
-  (transmute--run-command "exiftool" "-overwrite_original_in_place" "-TagsFromFile" src 
-                          "--EXIF:ExifImageWidth" "--EXIF:ExifImageHeight" dst)
-  (set-file-times dst (file-attribute-modification-time (file-attributes src))))
+  "Copy metadata from SRC to DST, excluding image dimensions and orientation.
+Also sets FileModifyDate from DateTimeOriginal and Orientation to Normal."
+  (transmute--run-command "exiftool" "-overwrite_original_in_place" "-Orientation=1" "-n"
+                          "-TagsFromFile" src 
+                          "--ExifImageWidth" "--ExifImageHeight" "--Orientation"
+                          "-FileModifyDate<DateTimeOriginal" dst))
 
 (defun transmute--trash (file)
   "Move FILE to trash."
@@ -267,9 +269,27 @@ Filters out exiftool warning lines from the output."
     (move-file-to-trash file)))
 
 (defun transmute--exif-cmd (src dst)
-  "Return exiftool command string to copy tags from SRC to DST, excluding image dimensions."
-  (format "exiftool -overwrite_original_in_place -TagsFromFile %s --EXIF:ExifImageWidth --EXIF:ExifImageHeight %s"
+  "Return exiftool command string to copy tags from SRC to DST, excluding image dimensions.
+Also sets FileModifyDate from DateTimeOriginal and Orientation to Normal."
+  (format "exiftool -overwrite_original_in_place -Orientation=1 -n -TagsFromFile %s --ExifImageWidth --ExifImageHeight --Orientation -FileModifyDate<DateTimeOriginal %s"
           (shell-quote-argument src) (shell-quote-argument dst)))
+
+(defun transmute--rotate-image (file degrees)
+  "Pixel-rotate FILE by DEGREES using ImageMagick.
+Uses -auto-orient to bake any existing EXIF orientation into the pixels
+first, then applies the rotation.  No EXIF orientation metadata is
+written — the result is a pure pixel rotation compatible with all viewers."
+  (let* ((file (expand-file-name file))
+         (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension file))))
+         (magick-cmd (format "magick %s -auto-orient -rotate %s %s"
+                             (shell-quote-argument file) degrees (shell-quote-argument tmp)))
+         (strip-orient (format "exiftool -overwrite_original_in_place -Orientation= %s"
+                               (shell-quote-argument tmp)))
+         (touch-cmd (format "touch -r %s %s" (shell-quote-argument file) (shell-quote-argument tmp)))
+         (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument file)))
+         (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+         (full-cmd (mapconcat #'identity (list magick-cmd strip-orient touch-cmd cp-cmd rm-tmp) " && ")))
+    (transmute--run-command-async (file-name-nondirectory file) full-cmd)))
 
 ;;; High-level Conversion Helpers
 
@@ -280,27 +300,25 @@ Preserves metadata and moves SRC to trash."
          (dst (expand-file-name dst))
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
          (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
-(exif-cmd (transmute--exif-cmd src tmp))
-          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
-          (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
-          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-          (trash-cmd (unless (string= src dst)
-                       (format "%s %s" transmute-trash-command (shell-quote-argument src))))
-          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
-     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
+         (exif-cmd (transmute--exif-cmd src tmp))
+         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+         (trash-cmd (unless (string= src dst)
+                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+         (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-image-copy (src dst &rest magick-args)
   "Convert image SRC to DST using MAGICK-ARGS.
 Preserves metadata, keeps SRC."
   (let* ((src (expand-file-name src))
-          (dst (expand-file-name dst))
-          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
-          (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
-          (exif-cmd (transmute--exif-cmd src tmp))
-         (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+         (dst (expand-file-name dst))
+         (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
+         (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
+         (exif-cmd (transmute--exif-cmd src tmp))
          (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (full-cmd (mapconcat #'identity (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp) " && ")))
+         (full-cmd (mapconcat #'identity (list magick-cmd exif-cmd cp-cmd rm-tmp) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-video (src dst &rest ffmpeg-args)
@@ -326,14 +344,13 @@ Preserves metadata and moves SRC to trash."
          (dst (expand-file-name dst))
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
          (gan-cmd (mapconcat #'shell-quote-argument (append (list "realesrgan-ncnn-vulkan") gan-args (list "-i" src "-o" tmp)) " "))
-(exif-cmd (transmute--exif-cmd src tmp))
-          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
-          (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
-          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-          (trash-cmd (unless (string= src dst)
-                       (format "%s %s" transmute-trash-command (shell-quote-argument src))))
-          (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
-     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
+         (exif-cmd (transmute--exif-cmd src tmp))
+         (cp-cmd (format "cp %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+         (trash-cmd (unless (string= src dst)
+                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+         (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 ;;; Batch / Dired Integration
 
@@ -418,19 +435,19 @@ After processing all files, run `transmute-after-batch-hook'."
 
 ;;;###autoload
 (defun transmute-picture-rotate-right ()
-  "Rotate images 90 degrees clockwise."
+  "Rotate images 90 degrees clockwise (pixel-only, no EXIF orientation)."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'image)))
     (transmute-do-batch targets
-      (transmute-convert-image file file "-rotate" "90"))))
+      (transmute--rotate-image file "90"))))
 
 ;;;###autoload
 (defun transmute-picture-rotate-left ()
-  "Rotate images 90 degrees counter-clockwise."
+  "Rotate images 90 degrees counter-clockwise (pixel-only, no EXIF orientation)."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'image)))
     (transmute-do-batch targets
-      (transmute-convert-image file file "-rotate" "-90"))))
+      (transmute--rotate-image file "-90"))))
 
 ;;;###autoload
 (defun transmute-picture-correct ()
