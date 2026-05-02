@@ -16,12 +16,20 @@
 (require 'dired)
 (require 'transient)
 
+(declare-function dired-image-thumbnail-get-marked "dired-image-thumbnail")
+(declare-function dired-image-thumbnail--nearest-image-original-file-name "dired-image-thumbnail")
+(defvar image-dired-thumbnail-mode-map)
+
 (defgroup transmute nil
   "Media management and conversion utilities."
   :group 'media)
 
 (defvar transmute-active-processes nil
   "List of active transmute processes.")
+
+(defvar transmute-after-batch-hook nil
+  "Hook run after each transmute batch operation completes.
+Useful for refreshing external buffers like image-dired thumbnail views.")
 
 (defvar transmute-total-tasks 0
   "Total number of tasks in the current batch.")
@@ -323,10 +331,19 @@ Preserves metadata and moves SRC to trash."
 
 (defun transmute-get-targets ()
   "Get list of files to process. 
-If in dired, use marked files or file at point. Otherwise ask for file."
-  (if (derived-mode-p 'dired-mode)
-      (dired-get-marked-files)
-    (list (read-file-name "Process file: "))))
+If in dired, use marked files or file at point.
+If in image-dired-thumbnail-mode, use marked or file at point.
+Otherwise ask for file."
+  (cond
+   ((derived-mode-p 'dired-mode)
+    (dired-get-marked-files))
+   ((and (derived-mode-p 'image-dired-thumbnail-mode)
+         (fboundp 'dired-image-thumbnail-get-marked))
+    (or (dired-image-thumbnail-get-marked)
+        (and (fboundp 'dired-image-thumbnail--nearest-image-original-file-name)
+             (let ((file (dired-image-thumbnail--nearest-image-original-file-name)))
+               (when file (list file))))))
+   (t (list (read-file-name "Process file: ")))))
 
 (defun transmute-get-filtered-targets (type)
   "Get marked files filtered by TYPE ('image, 'video, 'audio, or 'any)."
@@ -351,14 +368,16 @@ If in dired, use marked files or file at point. Otherwise ask for file."
       files)))
 
 (defmacro transmute-do-batch (files &rest body)
-  "Run BODY for each file in FILES, binding \='file\=' to current file."
+  "Run BODY for each file in FILES, binding \='file\=' to current file.
+After processing all files, run `transmute-after-batch-hook'."
   (declare (indent 1))
   `(let ((batch-files ,files))
      (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files)))
      (transmute--update-progress-display)
      (dolist (file batch-files)
        (let ((default-directory (file-name-directory file)))
-         ,@body))))
+         ,@body))
+     (run-hooks 'transmute-after-batch-hook)))
 
 ;;; Specific Commands
 
@@ -984,6 +1003,33 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 
 ;;;###autoload
 (transmute-progress-mode 1)
+
+(defun transmute-refresh-thumbnail ()
+  "Refresh dired and thumbnail buffers after a transmute batch operation.
+Re-scans the source directory to pick up renamed files, then refreshes."
+  (when (derived-mode-p 'image-dired-thumbnail-mode)
+    (when (and (boundp 'dired-image-thumbnail--dired-buffer)
+               (buffer-live-p dired-image-thumbnail--dired-buffer))
+      (with-current-buffer dired-image-thumbnail--dired-buffer
+        (revert-buffer)))
+    (when (and (boundp 'dired-image-thumbnail--source-dir)
+               dired-image-thumbnail--source-dir
+               (fboundp 'dired-image-thumbnail--find-images))
+      (setq dired-image-thumbnail--all-images
+            (dired-image-thumbnail--find-images
+             dired-image-thumbnail--source-dir
+             (and (boundp 'dired-image-thumbnail--recursive)
+                  dired-image-thumbnail--recursive))))
+    (when (fboundp 'dired-image-thumbnail-refresh)
+      (dired-image-thumbnail-refresh))))
+
+;;;###autoload
+(defun transmute-setup-thumbnail-keys ()
+  "Bind `transmute-menu' to C-c M in `image-dired-thumbnail-mode-map'.
+Call this in your init file after loading both packages."
+  (when (boundp 'image-dired-thumbnail-mode-map)
+    (define-key image-dired-thumbnail-mode-map (kbd "C-c M") #'transmute-menu))
+  (add-hook 'transmute-after-batch-hook #'transmute-refresh-thumbnail))
 
 (provide 'transmute)
 
