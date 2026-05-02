@@ -92,17 +92,18 @@ When nil, fallback completion is used."
   "Update the global header line based on active tasks."
   (when (bound-and-true-p transmute-progress-mode)
     (let ((current (default-value 'header-line-format)))
-      (if (> transmute-total-tasks 0)
+      (if transmute-active-processes
           (unless (member transmute--header-line-entry current)
             (setq-default header-line-format 
                           (if current 
                               (cons transmute--header-line-entry current)
                             (list transmute--header-line-entry))))
         (let ((new-fmt (delete transmute--header-line-entry current)))
-          ;; Clean up potential (nil) or empty lists that cause blank bars
           (setq-default header-line-format (if (or (null new-fmt) (equal new-fmt '(nil)))
                                                nil
-                                             new-fmt)))))
+                                             new-fmt)))
+        (setq transmute-total-tasks 0
+              transmute-completed-tasks 0)))
     (force-mode-line-update t)))
 
 ;;;###autoload
@@ -776,6 +777,47 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                                 "-HierarchicalSubject=" "-XPKeywords="
                                 "-Subject=" "-Keywords=" file))))
 
+(defun transmute--exif-field (file field)
+  "Return exiftool FIELD value for FILE, or nil if empty."
+  (let ((val (string-trim
+              (shell-command-to-string
+               (format "exiftool -s3 -%s %s" field (shell-quote-argument (expand-file-name file)))))))
+    (unless (or (string-empty-p val) (string-prefix-p "Warning" val)) val)))
+
+;;;###autoload
+(defun transmute-tag-info ()
+  "Show tags and key metadata for selected media files in a summary buffer."
+  (interactive)
+  (let ((targets (transmute-get-filtered-targets 'any)))
+    (when targets
+      (with-current-buffer (get-buffer-create "*transmute-info*")
+        (read-only-mode -1)
+        (erase-buffer)
+        (dolist (file targets)
+          (let* ((tags-list (or (transmute--exif-field file "TagsList") ""))
+                 (hier-subj (or (transmute--exif-field file "HierarchicalSubject") ""))
+                 (keywords (or (transmute--exif-field file "Keywords") ""))
+                 (subject (or (transmute--exif-field file "Subject") ""))
+                 (create-date (or (transmute--exif-field file "CreateDate") ""))
+                 (date-orig (or (transmute--exif-field file "DateTimeOriginal") ""))
+                 (mod-date (or (transmute--exif-field file "FileModifyDate") ""))
+                 (dims (or (transmute--exif-field file "ImageSize") ""))
+                 (file-type (or (transmute--exif-field file "MIMEType") "")))
+            (insert (propertize (file-name-nondirectory file) 'face '(:weight bold :underline t)))
+            (newline)
+            (insert (format "  Tags:                %s\n" tags-list))
+            (insert (format "  HierarchicalSubject: %s\n" hier-subj))
+            (insert (format "  Keywords:            %s\n" keywords))
+            (insert (format "  Subject:             %s\n" subject))
+            (insert (format "  CreateDate:          %s\n" create-date))
+            (insert (format "  DateTimeOriginal:    %s\n" date-orig))
+            (insert (format "  FileModifyDate:      %s\n" mod-date))
+            (insert (format "  Size:                %s\n" dims))
+            (insert (format "  Type:                %s\n" file-type))
+            (newline))))
+        (read-only-mode 1))
+      (pop-to-buffer "*transmute-info*")))
+
 ;;;###autoload
 (defun transmute-video-speed-up ()
   "Speed up video 2x (removes audio)."
@@ -868,6 +910,7 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                      ("Picture Tag Rename" . transmute-picture-tag-rename)
                      ("Picture Retag by Date" . transmute-retag-by-date)
                      ("Picture Clear Tags" . transmute-clear-tags)
+                     ("Picture Tag Info" . transmute-tag-info)
                      ("Picture Info" . transmute-picture-info)
                      ("Video Convert" . transmute-video-convert)
                      ("Video Shrink" . transmute-video-shrink)
@@ -913,7 +956,8 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
      ("tK" "Tag & Rename" transmute-tag-and-rename)
      ("tn" "Tag Rename" transmute-picture-tag-rename)
      ("td" "Retag by Date" transmute-retag-by-date)
-     ("tc" "Clear Tags" transmute-clear-tags)]]
+     ("tc" "Clear Tags" transmute-clear-tags)
+     ("ti" "Tag Info" transmute-tag-info)]]
   ["Video Commands"
    [("vc" "Convert" transmute-video-convert)
     ("vs" "Shrink" transmute-video-shrink)
