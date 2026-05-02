@@ -107,12 +107,24 @@
   (transmute--update-progress-display))
 
 (defcustom transmute-trash-command "trash-put"
-
   "Command to use for trashing files."
   :type 'string
   :group 'transmute)
 
+(defvar transmute-image-extensions
+  '("jpg" "jpeg" "png" "gif" "bmp" "tiff" "webp" "svg" "heic" "heif")
+  "List of image file extensions.")
+
+(defvar transmute-video-extensions
+  '("mp4" "mkv" "avi" "mov" "wmv" "flv" "webm" "m4v" "mpg" "mpeg")
+  "List of video file extensions.")
+
+(defvar transmute-audio-extensions
+  '("mp3" "wav" "flac" "ogg" "m4a" "aac" "wma")
+  "List of audio file extensions.")
+
 ;;; Core Variables & Parsing
+
 
 (defun transmute--parse-filename (file)
   "Parse media filename YYYYMMDDHHMMSS--description__tag1@tag2.ext.
@@ -306,6 +318,28 @@ If in dired, use marked files or file at point. Otherwise ask for file."
       (dired-get-marked-files)
     (list (read-file-name "Process file: "))))
 
+(defun transmute-get-filtered-targets (type)
+  "Get marked files filtered by TYPE ('image, 'video, 'audio, or 'any)."
+  (let* ((files (transmute-get-targets))
+         (extensions (cl-case type
+                       (image transmute-image-extensions)
+                       (video transmute-video-extensions)
+                       (audio transmute-audio-extensions)
+                       (any (append transmute-image-extensions 
+                                    transmute-video-extensions 
+                                    transmute-audio-extensions))
+                       (t nil))))
+    (if extensions
+        (let ((filtered (cl-remove-if-not
+                         (lambda (f)
+                           (let ((ext (file-name-extension f)))
+                             (and ext (member (downcase ext) extensions))))
+                         files)))
+          (unless filtered
+            (message "No %s files found in selection." (symbol-name type)))
+          filtered)
+      files)))
+
 (defmacro transmute-do-batch (files &rest body)
   "Run BODY for each file in FILES, binding \='file\=' to current file."
   (declare (indent 1))
@@ -322,154 +356,171 @@ If in dired, use marked files or file at point. Otherwise ask for file."
 (defun transmute-picture-convert ()
   "Convert images to JPG."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".jpg")))
-      (if (string-suffix-p ".svg" file t)
-          (transmute-convert-image-copy file dst "-density" "300" "-auto-orient" "-strip")
-        (transmute-convert-image file dst "-auto-orient" "-strip")))))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".jpg")))
+        (if (string-suffix-p ".svg" file t)
+            (transmute-convert-image-copy file dst "-density" "300" "-auto-orient" "-strip")
+          (transmute-convert-image file dst "-auto-orient" "-strip"))))))
 
 ;;;###autoload
 (defun transmute-picture-crush ()
   "Resize images to 640px."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute-convert-image file file "-auto-orient" "-strip" "-quality" "50%" "-resize" "640x>" "-resize" "x640>")))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (transmute-convert-image file file "-auto-orient" "-strip" "-quality" "50%" "-resize" "640x>" "-resize" "x640>"))))
 
 ;;;###autoload
 (defun transmute-picture-scale ()
   "Resize images to 1920px."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute-convert-image file file "-auto-orient" "-strip" "-quality" "50%" "-resize" "1920x>" "-resize" "x1920>")))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (transmute-convert-image file file "-auto-orient" "-strip" "-quality" "50%" "-resize" "1920x>" "-resize" "x1920>"))))
 
 ;;;###autoload
 (defun transmute-picture-rotate-right ()
   "Rotate images 90 degrees clockwise."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute-convert-image file file "-rotate" "90")))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (transmute-convert-image file file "-rotate" "90"))))
 
 ;;;###autoload
 (defun transmute-picture-rotate-left ()
   "Rotate images 90 degrees counter-clockwise."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute-convert-image file file "-rotate" "-90")))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (transmute-convert-image file file "-rotate" "-90"))))
 
 ;;;###autoload
 (defun transmute-picture-correct ()
   "Brighten images (120% modulate)."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute-convert-image file file "-modulate" "120,100,100")))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (transmute-convert-image file file "-modulate" "120,100,100"))))
 
 ;;;###autoload
 (defun transmute-video-convert ()
   "Convert videos to MP4 (h264/aac)."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".mp4")))
-      (transmute-convert-video file dst "-c:a" "aac" "-c:v" "libx264" "-crf" "23"))))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".mp4")))
+        (transmute-convert-video file dst "-c:a" "aac" "-c:v" "libx264" "-crf" "23")))))
 
 ;;;###autoload
 (defun transmute-video-shrink ()
   "Resize videos to fit 960x960."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".mp4")))
-      (transmute-convert-video file dst 
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".mp4")))
+        (transmute-convert-video file dst 
                                  "-vf" "scale='min(960,iw)':'min(960,ih)':force_original_aspect_ratio=decrease"
-                                 "-vcodec" "libx264" "-crf" "28" "-preset" "medium" "-movflags" "+faststart"))))
+                                 "-vcodec" "libx264" "-crf" "28" "-preset" "medium" "-movflags" "+faststart")))))
 
 ;;;###autoload
 (defun transmute-video-extract-audio ()
   "Extract audio from videos as WAV."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (timestamp (format-time-string "%Y%m%d%H%M%S"))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-" timestamp ".wav")))
-      (transmute-convert-video file dst "-vn" "-q:a" "0" "-map" "a"))))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (timestamp (format-time-string "%Y%m%d%H%M%S"))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-" timestamp ".wav")))
+        (transmute-convert-video file dst "-vn" "-q:a" "0" "-map" "a")))))
 
 ;;;###autoload
 (defun transmute-video-toptail (trim-start trim-end)
   "Trim video from start and end."
   (interactive "nTrim from start (sec): \nnTrim from end (sec): ")
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((duration-str (shell-command-to-string
-                          (format "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 %s"
-                                  (shell-quote-argument file))))
-           (duration (floor (string-to-number duration-str)))
-           (end-time (- duration trim-end))
-           (parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-trimmed." (cdr (assoc 'extension parsed)))))
-      (if (<= end-time trim-start)
-          (message "Error: Trim amount exceeds duration for %s" file)
-        (transmute-convert-video file dst "-ss" (number-to-string trim-start) "-t" (number-to-string end-time) "-c" "copy")))))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((duration-str (shell-command-to-string
+                            (format "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 %s"
+                                    (shell-quote-argument file))))
+             (duration (floor (string-to-number duration-str)))
+             (end-time (- duration trim-end))
+             (parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-trimmed." (cdr (assoc 'extension parsed)))))
+        (if (<= end-time trim-start)
+            (message "Error: Trim amount exceeds duration for %s" file)
+          (transmute-convert-video file dst "-ss" (number-to-string trim-start) "-t" (number-to-string end-time) "-c" "copy"))))))
 
 ;;;###autoload
 (defun transmute-picture-upscale ()
   "Upscale images using realesrgan-x4plus."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".jpg")))
-      (transmute-convert-gan file dst "-n" "realesrgan-x4plus" "-j" "8:8:8" "-f" "jpg"))))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".jpg")))
+        (transmute-convert-gan file dst "-n" "realesrgan-x4plus" "-j" "8:8:8" "-f" "jpg")))))
 
 ;;;###autoload
 (defun transmute-picture-get-text ()
   "Extract text from images using tesseract OCR."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (out-base (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)))))
-      (transmute--run-command "tesseract" "-l" "eng" file out-base))))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (out-base (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)))))
+        (transmute--run-command "tesseract" "-l" "eng" file out-base)))))
 
 ;;;###autoload
 (defun transmute-picture-autocolour ()
   "Auto-level image colors."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute-convert-image file file "-auto-level")))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (transmute-convert-image file file "-auto-level"))))
 
 ;;;###autoload
 (defun transmute-video-remove-audio ()
   "Remove audio from videos."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute-convert-video file file "-an" "-c:v" "copy")))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (transmute-convert-video file file "-an" "-c:v" "copy"))))
 
 ;;;###autoload
 (defun transmute-video-reverse ()
   "Reverse video and audio."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-reversed." (cdr (assoc 'extension parsed)))))
-      (transmute-convert-video file dst "-vf" "reverse" "-af" "areverse"))))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-reversed." (cdr (assoc 'extension parsed)))))
+        (transmute-convert-video file dst "-vf" "reverse" "-af" "areverse")))))
 
 ;;;###autoload
 (defun transmute-video-rotate-right ()
   "Rotate video 90 degrees clockwise."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute-convert-video file file "-vf" "transpose=1")))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (transmute-convert-video file file "-vf" "transpose=1"))))
 
 ;;;###autoload
 (defun transmute-video-rotate-left ()
   "Rotate video 90 degrees counter-clockwise."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute-convert-video file file "-vf" "transpose=2")))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (transmute-convert-video file file "-vf" "transpose=2"))))
 
 ;;;###autoload
 (defun transmute-picture-to-pdf ()
   "Convert images to PDF."
   (interactive)
-  (let ((targets (transmute-get-targets)))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
     (if (= (length targets) 1)
         (let* ((file (car targets))
                (parsed (transmute--parse-filename file))
@@ -489,198 +540,213 @@ If in dired, use marked files or file at point. Otherwise ask for file."
   "Interactively tag selected media files.
 TAGS is a comma-separated string or list of tags."
   (interactive (list (completing-read-multiple "Tags (comma separated): " nil)))
-  (let* ((tag-list (if (stringp tags) (split-string tags "," t) tags))
-         (tag-str (mapconcat #'identity tag-list ","))
-         (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
-         (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
-         (keyword-str (mapconcat #'identity keywords ",")))
-    (transmute-do-batch (transmute-get-targets)
-      (message "Tagging %s with %s" file tag-str)
-      (transmute--run-command "exiftool" "-overwrite_original_in_place"
-                                (format "-TagsList=%s" hier-tag-str)
-                                (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
-                                (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
-                                (format "-XPKeywords=%s" keyword-str)
-                                (format "-Subject=%s" keyword-str)
-                                (format "-Keywords=%s" keyword-str)
-                                file))))
+  (when-let ((targets (transmute-get-filtered-targets 'any)))
+    (let* ((tag-list (if (stringp tags) (split-string tags "," t) tags))
+           (tag-str (mapconcat #'identity tag-list ","))
+           (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
+           (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
+           (keyword-str (mapconcat #'identity keywords ",")))
+      (transmute-do-batch targets
+        (message "Tagging %s with %s" file tag-str)
+        (transmute--run-command "exiftool" "-overwrite_original_in_place"
+                                  (format "-TagsList=%s" hier-tag-str)
+                                  (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
+                                  (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
+                                  (format "-XPKeywords=%s" keyword-str)
+                                  (format "-Subject=%s" keyword-str)
+                                  (format "-Keywords=%s" keyword-str)
+                                  file)))))
 
 ;;;###autoload
 (defun transmute-retag-by-date ()
   "Rename images based on EXIF creation date."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((date-info (transmute-get-date file))
-           (prop (car date-info))
-           (val (cadr date-info)))
-      (when date-info
-        (when (member prop '("FileModifyDate" "ModifyDate"))
-          (message "Writing %s to CreateDate and DateTimeOriginal for %s" prop file)
-          (shell-command (format "exiftool -all= -overwrite_original_in_place \"-CreateDate<%s\" \"-DateTimeOriginal<%s\" %s"
-                                 prop prop (shell-quote-argument file))))
-        (let* ((formatted-date (transmute-format-date val))
-               (parsed (transmute--parse-filename file))
-               (current-ts (cdr (assoc 'timestamp parsed)))
-               (label (cdr (assoc 'label parsed)))
-               (tags-raw (cdr (assoc 'tags-raw parsed)))
-               (ext (cdr (assoc 'extension parsed)))
-               (basedir (cdr (assoc 'directory parsed))))
-          (if (not (string= formatted-date current-ts))
-              (let* ((new-base (format "%s--%s" formatted-date label))
-                     (new-name (if tags-raw
-                                   (format "%s/%s__%s.%s" basedir new-base tags-raw ext)
-                                 (format "%s/%s.%s" basedir new-base ext)))
-                     (final-name new-name)
-                     (counter 1))
-                (while (file-exists-p final-name)
-                  (setq final-name (if tags-raw
-                                       (format "%s/%s%d__%s.%s" basedir new-base counter tags-raw ext)
-                                     (format "%s/%s%d.%s" basedir new-base counter ext)))
-                  (cl-incf counter))
-                (unless (string= (expand-file-name final-name) (expand-file-name file))
-                  (message "%s -> %s" file final-name)
-                  (rename-file file final-name)))
-            (message "#### %s : NO CHANGE" file)))))))
+  (when-let ((targets (transmute-get-filtered-targets 'any)))
+    (transmute-do-batch targets
+      (let* ((date-info (transmute-get-date file))
+             (prop (car date-info))
+             (val (cadr date-info)))
+        (when date-info
+          (when (member prop '("FileModifyDate" "ModifyDate"))
+            (message "Writing %s to CreateDate and DateTimeOriginal for %s" prop file)
+            (shell-command (format "exiftool -all= -overwrite_original_in_place \"-CreateDate<%s\" \"-DateTimeOriginal<%s\" %s"
+                                   prop prop (shell-quote-argument file))))
+          (let* ((formatted-date (transmute-format-date val))
+                 (parsed (transmute--parse-filename file))
+                 (current-ts (cdr (assoc 'timestamp parsed)))
+                 (label (cdr (assoc 'label parsed)))
+                 (tags-raw (cdr (assoc 'tags-raw parsed)))
+                 (ext (cdr (assoc 'extension parsed)))
+                 (basedir (cdr (assoc 'directory parsed))))
+            (if (not (string= formatted-date current-ts))
+                (let* ((new-base (format "%s--%s" formatted-date label))
+                       (new-name (if tags-raw
+                                     (format "%s/%s__%s.%s" basedir new-base tags-raw ext)
+                                   (format "%s/%s.%s" basedir new-base ext)))
+                       (final-name new-name)
+                       (counter 1))
+                  (while (file-exists-p final-name)
+                    (setq final-name (if tags-raw
+                                         (format "%s/%s%d__%s.%s" basedir new-base counter tags-raw ext)
+                                       (format "%s/%s%d.%s" basedir new-base counter ext)))
+                    (cl-incf counter))
+                  (unless (string= (expand-file-name final-name) (expand-file-name file))
+                    (message "%s -> %s" file final-name)
+                    (rename-file file final-name)))
+              (message "#### %s : NO CHANGE" file))))))))
 
 ;;;###autoload
 (defun transmute-audio-convert ()
   "Convert audio to MP3."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".mp3")))
-      (transmute--run-command-async (file-name-nondirectory file)
-                                      (format "ffmpeg -hide_banner -loglevel warning -stats -y -i %s -b:a 192k %s"
-                                              (shell-quote-argument file)
-                                              (shell-quote-argument (expand-file-name dst)))))))
+  (when-let ((targets (transmute-get-filtered-targets 'audio)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".mp3")))
+        (transmute--run-command-async (file-name-nondirectory file)
+                                        (format "ffmpeg -hide_banner -loglevel warning -stats -y -i %s -b:a 192k %s"
+                                                (shell-quote-argument file)
+                                                (shell-quote-argument (expand-file-name dst))))))))
 
 ;;;###autoload
 (defun transmute-audio-info ()
   "Show audio ID3 tags."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute--run-command "id3v2" "-l" file)))
+  (when-let ((targets (transmute-get-filtered-targets 'audio)))
+    (transmute-do-batch targets
+      (transmute--run-command "id3v2" "-l" file))))
 
 ;;;###autoload
 (defun transmute-picture-info ()
   "Show image metadata."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute--run-command "exiftool" "-g" file)))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (transmute--run-command "exiftool" "-g" file))))
 
 ;;;###autoload
 (defun transmute-video-info ()
   "Show video info using ffprobe and exiftool."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute--run-command "ffprobe" file)
-    (transmute--run-command "exiftool" file)))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (transmute--run-command "ffprobe" file)
+      (transmute--run-command "exiftool" file))))
 
 ;;;###autoload
 (defun transmute-video-to-gif ()
   "Convert video to GIF."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".gif")))
-      (transmute-convert-video file dst "-vf" "fps=20,scale=800:-1:flags=lanczos" "-loop" "0"))))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".gif")))
+        (transmute-convert-video file dst "-vf" "fps=20,scale=800:-1:flags=lanczos" "-loop" "0")))))
 
 ;;;###autoload
 (defun transmute-picture-update-from-create-date ()
   "Update FileModifyDate and DateTimeOriginal from CreateDate."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (transmute--run-command-async (file-name-nondirectory file)
-                                    (format "exiftool -overwrite_original \"-FileModifyDate<CreateDate\" \"-DateTimeOriginal<CreateDate\" %s"
-                                            (shell-quote-argument file)))))
+  (when-let ((targets (transmute-get-filtered-targets 'any)))
+    (transmute-do-batch targets
+      (transmute--run-command-async (file-name-nondirectory file)
+                                      (format "exiftool -overwrite_original \"-FileModifyDate<CreateDate\" \"-DateTimeOriginal<CreateDate\" %s"
+                                              (shell-quote-argument file))))))
 
 ;;;###autoload
 (defun transmute-picture-tag-rename ()
   "Rename file based on its tags and creation date."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((date-info (transmute-get-date file))
-           (val (cadr date-info))
-           (tags-out (shell-command-to-string (format "exiftool -s3 -TagsList %s" (shell-quote-argument file))))
-           (tags (string-trim tags-out)))
-      (when (and date-info (not (string-empty-p tags)))
-        (let* ((formatted-tags (replace-regexp-in-string "/" "@" (replace-regexp-in-string "," "-" tags)))
-               (formatted-date (transmute-format-date val))
-               (parsed (transmute--parse-filename file))
-               (label (cdr (assoc 'label parsed)))
-               (ext (cdr (assoc 'extension parsed)))
-               (basedir (cdr (assoc 'directory parsed)))
-               (new-base (format "%s--%s" formatted-date label))
-               (new-name (format "%s/%s__%s.%s" basedir new-base formatted-tags ext))
-               (final-name new-name)
-               (counter 1))
-          (while (file-exists-p final-name)
-            (setq final-name (format "%s/%s%d__%s.%s" basedir new-base counter formatted-tags ext))
-            (cl-incf counter))
-          (unless (string= (expand-file-name final-name) (expand-file-name file))
-            (message "%s -> %s" file final-name)
-            (rename-file file final-name)))))))
+  (when-let ((targets (transmute-get-filtered-targets 'any)))
+    (transmute-do-batch targets
+      (let* ((date-info (transmute-get-date file))
+             (val (cadr date-info))
+             (tags-out (shell-command-to-string (format "exiftool -s3 -TagsList %s" (shell-quote-argument file))))
+             (tags (string-trim tags-out)))
+        (when (and date-info (not (string-empty-p tags)))
+          (let* ((formatted-tags (replace-regexp-in-string "/" "@" (replace-regexp-in-string "," "-" tags)))
+                 (formatted-date (transmute-format-date val))
+                 (parsed (transmute--parse-filename file))
+                 (label (cdr (assoc 'label parsed)))
+                 (ext (cdr (assoc 'extension parsed)))
+                 (basedir (cdr (assoc 'directory parsed)))
+                 (new-base (format "%s--%s" formatted-date label))
+                 (new-name (format "%s/%s__%s.%s" basedir new-base formatted-tags ext))
+                 (final-name new-name)
+                 (counter 1))
+            (while (file-exists-p final-name)
+              (setq final-name (format "%s/%s%d__%s.%s" basedir new-base counter formatted-tags ext))
+              (cl-incf counter))
+            (unless (string= (expand-file-name final-name) (expand-file-name file))
+              (message "%s -> %s" file final-name)
+              (rename-file file final-name))))))))
 
 ;;;###autoload
 (defun transmute-video-speed-up ()
   "Speed up video 2x (removes audio)."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (timestamp (format-time-string "%Y%m%d%H%M%S"))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-sped-" timestamp ".mp4")))
-      (transmute-convert-video file dst "-threads" "8" "-an" "-filter:v" "setpts=0.5*PTS" "-r" "30"))))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (timestamp (format-time-string "%Y%m%d%H%M%S"))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-sped-" timestamp ".mp4")))
+        (transmute-convert-video file dst "-threads" "8" "-an" "-filter:v" "setpts=0.5*PTS" "-r" "30")))))
 
 ;;;###autoload
 (defun transmute-video-slow-down ()
   "Slow down video 5x (removes audio)."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (timestamp (format-time-string "%Y%m%d%H%M%S"))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-slow-" timestamp ".mp4")))
-      (transmute-convert-video file dst "-threads" "2" "-an" "-filter:v" "setpts=5*PTS" "-r" "30"))))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (timestamp (format-time-string "%Y%m%d%H%M%S"))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-slow-" timestamp ".mp4")))
+        (transmute-convert-video file dst "-threads" "2" "-an" "-filter:v" "setpts=5*PTS" "-r" "30")))))
 
 ;;;###autoload
 (defun transmute-audio-normalise ()
   "Normalise audio using sox."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-norm." (cdr (assoc 'extension parsed)))))
-      (transmute--run-command-async (file-name-nondirectory file)
-                                      (format "sox --norm=0 %s %s"
-                                              (shell-quote-argument file)
-                                              (shell-quote-argument (expand-file-name dst)))))))
+  (when-let ((targets (transmute-get-filtered-targets 'audio)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-norm." (cdr (assoc 'extension parsed)))))
+        (transmute--run-command-async (file-name-nondirectory file)
+                                        (format "sox --norm=0 %s %s"
+                                                (shell-quote-argument file)
+                                                (shell-quote-argument (expand-file-name dst))))))))
 
 ;;;###autoload
 (defun transmute-audio-trim-silence ()
   "Trim silence from start and end of audio."
   (interactive)
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-trim.mp3")))
-      (transmute--run-command-async (file-name-nondirectory file)
-                                      (format "ffmpeg -hide_banner -loglevel warning -stats -y -i %s -af silenceremove=start_periods=1:start_duration=1:start_threshold=-60dB:detection=peak,aformat=dblp,areverse,silenceremove=start_periods=1:start_duration=1:start_threshold=-60dB:detection=peak,aformat=dblp,areverse %s"
-                                              (shell-quote-argument file)
-                                              (shell-quote-argument (expand-file-name dst)))))))
+  (when-let ((targets (transmute-get-filtered-targets 'audio)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-trim.mp3")))
+        (transmute--run-command-async (file-name-nondirectory file)
+                                        (format "ffmpeg -hide_banner -loglevel warning -stats -y -i %s -af silenceremove=start_periods=1:start_duration=1:start_threshold=-60dB:detection=peak,aformat=dblp,areverse,silenceremove=start_periods=1:start_duration=1:start_threshold=-60dB:detection=peak,aformat=dblp,areverse %s"
+                                                (shell-quote-argument file)
+                                                (shell-quote-argument (expand-file-name dst))))))))
 
 ;;;###autoload
 (defun transmute-picture-crop (width height)
   "Crop image to WIDTHxHEIGHT centered."
   (interactive "nWidth: \nnHeight: ")
   (let ((dim (format "%dx%d" width height)))
-    (transmute-do-batch (transmute-get-targets)
-      (transmute-convert-image file file "-resize" (concat dim "^") "-gravity" "center" "-extent" dim))))
+    (when-let ((targets (transmute-get-filtered-targets 'image)))
+      (transmute-do-batch targets
+        (transmute-convert-image file file "-resize" (concat dim "^") "-gravity" "center" "-extent" dim)))))
 
 ;;;###autoload
 (defun transmute-video-cut (start duration)
   "Cut video from START for DURATION seconds."
   (interactive "sStart (HH:MM:SS or sec): \nsDuration (sec): ")
-  (transmute-do-batch (transmute-get-targets)
-    (let* ((parsed (transmute--parse-filename file))
-           (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-cut." (cdr (assoc 'extension parsed)))))
-      (transmute-convert-video file dst "-ss" start "-t" duration "-c" "copy"))))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((parsed (transmute--parse-filename file))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-cut." (cdr (assoc 'extension parsed)))))
+        (transmute-convert-video file dst "-ss" start "-t" duration "-c" "copy")))))
 
 ;;;###autoload
 (defun transmute-video-to-mp4 ()
