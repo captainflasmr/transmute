@@ -1059,47 +1059,56 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 
 (defun transmute-refresh-thumbnail ()
   "Refresh dired and thumbnail buffers after a transmute batch operation.
-Re-scans the source directory to pick up renamed files, then refreshes."
-  (let ((files transmute-batch-files))
+Handles renamed files by updating their visiting buffers and reverts
+affected buffers silently to prevent file-supersession prompts."
+  (let ((files (mapcar #'expand-file-name transmute-batch-files))
+        (renames transmute--last-renames))
     (run-at-time 0.5 nil
       (lambda ()
         (clear-image-cache)
         (when (fboundp 'dired-image-thumbnail-clear-preview-cache)
           (dired-image-thumbnail-clear-preview-cache))
+        
+        ;; 1. Delete associated thumbnails to force regeneration
         (dolist (f files)
           (when (and (boundp 'image-dired-dir)
                      (fboundp 'image-dired-thumb-name))
             (let ((thumb (image-dired-thumb-name f)))
               (when (file-exists-p thumb)
                 (delete-file thumb)))))
+        
+        ;; 2. Synchronize all buffers visiting affected files
         (dolist (buf (buffer-list))
           (with-current-buffer buf
+            (let ((bfn (and buffer-file-name (expand-file-name buffer-file-name))))
+              (when bfn
+                (let ((new-name (cdr (assoc bfn renames))))
+                  (cond
+                   ;; Case A: File was renamed
+                   (new-name
+                    (set-visited-file-name new-name nil t)
+                    (revert-buffer nil t))
+                   ;; Case B: File was modified (e.g. rotated) but name kept
+                   ((member bfn files)
+                    (revert-buffer nil t))))))
+            ;; Also revert Dired buffers for directories involved
             (when (derived-mode-p 'dired-mode)
               (revert-buffer nil t))))
+
+        ;; 3. Refresh the thumbnail view
         (if (fboundp 'dired-image-thumbnail-refresh-all)
-            (dired-image-thumbnail-refresh-all transmute--last-renames)
+            (dired-image-thumbnail-refresh-all renames)
+          ;; Manual fallback for legacy dired-image-thumbnail
           (dolist (buf (buffer-list))
             (with-current-buffer buf
               (when (derived-mode-p 'image-dired-thumbnail-mode)
-                (when (and (boundp 'dired-image-thumbnail--dired-buffer)
-                           (buffer-live-p dired-image-thumbnail--dired-buffer))
-                  (with-current-buffer dired-image-thumbnail--dired-buffer
-                    (revert-buffer nil t)))
-                ;; Clear dimension cache so header line shows updated sizes
-                (when (bound-and-true-p dired-image-thumbnail--dimension-cache)
+                (when (and (boundp 'dired-image-thumbnail--dimension-cache)
+                           dired-image-thumbnail--dimension-cache)
                   (clrhash dired-image-thumbnail--dimension-cache))
-                (when (bound-and-true-p dired-image-thumbnail--dimension-pending)
-                  (clrhash dired-image-thumbnail--dimension-pending))
-                (when (and (boundp 'dired-image-thumbnail--source-dir)
-                           dired-image-thumbnail--source-dir
-                           (fboundp 'dired-image-thumbnail--find-images))
-                  (setq dired-image-thumbnail--all-images
-                        (dired-image-thumbnail--find-images
-                         dired-image-thumbnail--source-dir
-                         (and (boundp 'dired-image-thumbnail--recursive)
-                              dired-image-thumbnail--recursive))))
                 (when (fboundp 'dired-image-thumbnail-refresh)
                   (dired-image-thumbnail-refresh))))))
+
+        ;; 4. Finally, refresh the full-size display if active
         (when (fboundp 'dired-image-thumbnail-refresh-current-display)
           (dired-image-thumbnail-refresh-current-display))))))
 
