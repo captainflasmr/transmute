@@ -639,6 +639,32 @@ asynchronous processes are active."
                                                 (shell-quote-argument dst)))))))
 
 ;;;###autoload
+(defun transmute-picture-montage (output-file)
+  "Create a 2x4 montage of selected images at 1024px width.
+Images are resized to temporary files to avoid modifying originals."
+  (interactive (list (read-file-name "Output montage: " nil "montage_001.jpg")))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (let* ((tmp-dir (make-temp-file "transmute-montage-" t))
+           (resized-files nil)
+           (width 1024)
+           (resize-cmds nil))
+      (dolist (img targets)
+        (let* ((base (file-name-nondirectory img))
+               (tmp-img (expand-file-name base tmp-dir)))
+          (push tmp-img resized-files)
+          (push (format "magick %s -resize %dx %s"
+                        (shell-quote-argument (expand-file-name img))
+                        width
+                        (shell-quote-argument tmp-img))
+                resize-cmds)))
+      (let* ((montage-cmd (format "magick montage -tile 2x4 -mode Concatenate -gravity NorthWest -alpha off -background darkgrey %s %s"
+                                 (mapconcat #'shell-quote-argument (reverse resized-files) " ")
+                                 (shell-quote-argument (expand-file-name output-file))))
+             (cleanup-cmd (format "rm -rf %s" (shell-quote-argument tmp-dir)))
+             (full-cmd (mapconcat #'identity (append (reverse resize-cmds) (list montage-cmd cleanup-cmd)) " && ")))
+        (transmute--run-command-async "Montage" full-cmd)))))
+
+;;;###autoload
 (defun transmute-tag-interactive (tags)
   "Interactively tag selected media files.
 TAGS is a comma-separated string or list of tags."
@@ -881,6 +907,57 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                (format "exiftool -s3 -%s %s" field (shell-quote-argument (expand-file-name file)))))))
     (unless (or (string-empty-p val) (string-prefix-p "Warning" val)) val)))
 
+(defun transmute--get-sidecar-files (file)
+  "Return list of sidecar files for FILE (e.g. file.xmp, file.jpg.xmp)."
+  (let* ((abs-file (expand-file-name file))
+         (dir (file-name-directory abs-file))
+         (name (file-name-nondirectory abs-file))
+         (sidecars nil))
+    ;; case 1: file.xmp
+    (let ((s1 (concat (file-name-sans-extension abs-file) ".xmp")))
+      (when (and (file-exists-p s1) (not (string= s1 abs-file)))
+        (push s1 sidecars)))
+    ;; case 2: file.ext.xmp
+    (let ((s2 (concat abs-file ".xmp")))
+      (when (file-exists-p s2)
+        (push s2 sidecars)))
+    sidecars))
+
+;;;###autoload
+(defun transmute-picture-organise ()
+  "Move selected files into YYYYMM subdirectories and move sidecars (.xmp)."
+  (interactive)
+  (when-let ((targets (transmute-get-targets)))
+    (transmute-do-batch targets
+      (let* ((date-info (transmute-get-date file))
+             (val (cadr date-info)))
+        (if (not date-info)
+            (message "No date found for %s" file)
+          (let* ((formatted-date (transmute-format-date val))
+                 (year-month (substring formatted-date 0 6))
+                 (basedir (file-name-directory (expand-file-name file)))
+                 (dest-dir (expand-file-name year-month basedir))
+                 (main-name (file-name-nondirectory file))
+                 (new-main (expand-file-name main-name dest-dir))
+                 (sidecars (transmute--get-sidecar-files file)))
+            (unless (file-directory-p dest-dir)
+              (make-directory dest-dir t))
+            ;; Update rename record for main file
+            (let ((abs-orig (expand-file-name file))
+                  (abs-new (expand-file-name new-main)))
+              (unless (string= abs-orig abs-new)
+                (message "Organizing: %s -> %s" abs-orig abs-new)
+                (setq transmute--last-renames (cons (cons abs-orig abs-new) transmute--last-renames))
+                (rename-file abs-orig abs-new t))
+              ;; Move sidecars
+              (dolist (s sidecars)
+                (let* ((s-abs (expand-file-name s))
+                       (new-s (expand-file-name (file-name-nondirectory s) dest-dir))
+                       (new-s-abs (expand-file-name new-s)))
+                  (unless (string= s-abs new-s-abs)
+                    (setq transmute--last-renames (cons (cons s-abs new-s-abs) transmute--last-renames))
+                    (rename-file s-abs new-s-abs t)))))))))))
+
 ;;;###autoload
 (defun transmute-tag-info ()
   "Show tags and key metadata for selected media files in a summary buffer."
@@ -982,6 +1059,8 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                      ("Picture Clear Tags" . transmute-clear-tags)
                      ("Picture Tag Info" . transmute-tag-info)
                      ("Picture Info" . transmute-picture-info)
+                     ("Picture Montage" . transmute-picture-montage)
+                     ("Picture Organise" . transmute-picture-organise)
                      ("Video Convert" . transmute-video-convert)
                      ("Video Shrink" . transmute-video-shrink)
                      ("Video To GIF" . transmute-video-to-gif)
@@ -1019,6 +1098,8 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
     ("ia" "Auto Colour" transmute-picture-autocolour)
     ("if" "Update from CreateDate" transmute-picture-update-from-create-date)
     ("ip" "To PDF" transmute-picture-to-pdf)
+    ("im" "Montage" transmute-picture-montage)
+    ("io" "Organise" transmute-picture-organise)
     ("iC" "Crop" transmute-picture-crop)
     ("ii" "Info" transmute-picture-info)]
    ["Video"
