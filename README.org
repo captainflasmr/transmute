@@ -9,14 +9,14 @@ Designed for Dired users, Transmute allows you to batch process images, videos, 
 
 * Features
 
-- *Images:* Convert, resize (crush/scale), upscale (GAN), rotate, brighten, auto-colour, crop, OCR (text extraction), and convert to PDF.
-- *Video:* Convert (H.264/AAC), shrink, reverse, speed up/slow down, trim (top/tail), cut, extract audio, and convert to GIF.
+- *Images:* Convert, resize (crush/scale), upscale (GAN), rotate, brighten, auto-colour, crop, OCR (text extraction), convert to PDF, extract from PDF, montage creation, date-based organisation, WhatsApp filename fix, orientation reset, horizontal split, and Org capture gallery export.
+- *Video:* Convert (H.264/AAC), shrink, rescale, rotate (R/L/CCW), reverse, speed up/slow down, trim (top/tail), cut, extract audio, remove/replace audio, background music injection (random library with fade-out), concatenate, double length, extract frames, from frames sequence, GIF conversion, and glitch/flip removal.
 - *Audio:* Convert to MP3, normalise volume, and trim silence.
-- *Metadata:* Interactive hierarchical tagging, renaming based on creation date/tags, and EXIF management.
+- *Metadata:* Interactive hierarchical tagging, renaming based on creation date/tags, EXIF management, and sidecar file (.xmp) synchronization.
 - *Intelligent Filtering:* Commands automatically filter your selection to relevant files (e.g., Image commands only target images), allowing you to safely trigger batch operations on mixed-media folders.
 - *Async Engine:* All operations run asynchronously in the background with automatic cleanup of temporary files.
 - *Status:* Real-time progress tracking in the Emacs =header-line= and centralized logging in the =*transmute-log*= buffer.
-- *Interface:* Includes both a *Transient* menu (like Magit) and a *Completing-Read* menu.
+- *Interface:* Reorganized multi-column *Transient* menu (grouped by operation type) and a *Completing-Read* menu.
 
 * Dependencies
 
@@ -27,6 +27,7 @@ Transmute relies on the following tools being installed in your system path:
 - =ffmpeg= / =ffprobe= (Video and audio processing)
 - =sox= (Audio normalisation)
 - =tesseract= (OCR/Text extraction)
+- =pdftoppm= (from =poppler-utils=, for PDF image extraction)
 - =realesrgan-ncnn-vulkan= (Optional: for AI upscaling)
 - =trash-put= (Optional: for safe file deletion)
 

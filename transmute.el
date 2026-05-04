@@ -683,8 +683,86 @@ TAGS is a comma-separated string or list of tags."
                                   (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
                                   (format "-XPKeywords=%s" keyword-str)
                                   (format "-Subject=%s" keyword-str)
-                                  (format "-Keywords=%s" keyword-str)
                                   file)))))
+
+;;;###autoload
+(defun transmute-picture-email ()
+  "Prepare images for email sending by resizing and stripping metadata.
+Saves to ~/Pictures/YYYYMMDDHH/."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (let* ((date (format-time-string "%Y%m%d%H"))
+           (dest-dir (expand-file-name (format "~/Pictures/%s" date))))
+      (unless (file-directory-p dest-dir)
+        (make-directory dest-dir t))
+      (transmute-do-batch targets
+        (let* ((filename (file-name-nondirectory file))
+               (dst (expand-file-name filename dest-dir)))
+          (transmute-convert-image-copy file dst "-auto-orient" "-strip" "-quality" "50%" "-resize" "1920x>" "-resize" "x1920>"))))))
+
+;;;###autoload
+(defun transmute-picture-from-pdf ()
+  "Extract JPEGs from PDF files using pdftoppm."
+  (interactive)
+  (let ((targets (seq-filter (lambda (f) (string-suffix-p ".pdf" f t)) (transmute-get-targets))))
+    (if (null targets)
+        (message "No PDF files selected.")
+      (transmute-do-batch targets
+        (let* ((parsed (transmute--parse-filename file))
+               (basedir (cdr (assoc 'directory parsed)))
+               (no-ext (cdr (assoc 'no-ext parsed)))
+               (out-prefix (if (> (length no-ext) 20) (substring no-ext 0 20) no-ext))
+               (dst-prefix (expand-file-name out-prefix basedir)))
+          (transmute--run-command-async (file-name-nondirectory file)
+                                          (format "pdftoppm -r 300 -jpeg %s %s"
+                                                  (shell-quote-argument file)
+                                                  (shell-quote-argument dst-prefix))))))))
+
+;;;###autoload
+(defun transmute-picture-orientation-reset ()
+  "Reset EXIF orientation to normal and optimization image."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (let* ((cmd (format "exiftool -overwrite_original -orientation#=1 %s && magick %s -auto-orient -strip %s"
+                          (shell-quote-argument file)
+                          (shell-quote-argument file)
+                          (shell-quote-argument file))))
+        (transmute--run-command-async (file-name-nondirectory file) cmd)))))
+
+;;;###autoload
+(defun transmute-picture-split (num-splits)
+  "Split image horizontally into NUM-SPLITS parts."
+  (interactive "nNumber of horizontal splits: ")
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (let* ((filename (file-name-nondirectory file))
+             (no-ext (file-name-sans-extension filename))
+             (dims (shell-command-to-string (format "identify -format \"%%w %%h\" %s" (shell-quote-argument file))))
+             (dim-list (split-string dims " "))
+             (width (string-to-number (car dim-list)))
+             (height (string-to-number (cadr dim-list)))
+             (slice-width (/ width num-splits))
+             (cmds nil))
+        (dotimes (i num-splits)
+          (let* ((offset (* i slice-width))
+                 (out-file (format "%s_%d.png" no-ext i)))
+            (push (format "magick %s -crop %dx%d+%d+0 %s"
+                          (shell-quote-argument file)
+                          slice-width height offset
+                          (shell-quote-argument out-file))
+                  cmds)))
+        (transmute--run-command-async (file-name-nondirectory file)
+                                        (mapconcat #'identity (reverse cmds) " && "))))))
+
+;;;###autoload
+(defun transmute-picture-to-capture ()
+  "Trigger Org capture gallery with selected files."
+  (interactive)
+  (when-let ((targets (transmute-get-targets)))
+    (let ((files-str (mapconcat #'expand-file-name targets ";")))
+      (when (fboundp 'my/external-org-capture-blog-with-gallery)
+        (my/external-org-capture-blog-with-gallery files-str)))))
 
 (defun transmute--known-tags ()
   "Return a list of known tags from `transmute-tag-list-file'."
@@ -809,6 +887,16 @@ TAGS is a comma-separated string or list of tags selected via
     (transmute-do-batch targets
       (transmute--run-command-async (file-name-nondirectory file)
                                       (format "exiftool -P -overwrite_original \"-FileModifyDate<CreateDate\" \"-DateTimeOriginal<CreateDate\" %s"
+                                              (shell-quote-argument file))))))
+
+;;;###autoload
+(defun transmute-picture-update-to-create-date ()
+  "Update CreateDate and DateTimeOriginal from FileModifyDate."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'any)))
+    (transmute-do-batch targets
+      (transmute--run-command-async (file-name-nondirectory file)
+                                      (format "exiftool -overwrite_original \"-CreateDate<FileModifyDate\" \"-DateTimeOriginal<FileModifyDate\" %s"
                                               (shell-quote-argument file))))))
 
 ;;;###autoload
@@ -977,6 +1065,47 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
         (transmute-convert-video file dst "-threads" "8" "-an" "-filter:v" "setpts=0.5*PTS" "-r" "30")))))
 
 ;;;###autoload
+(defun transmute-picture-fix-whatsapp ()
+  "Fix WhatsApp images by extracting date from filename and setting metadata.
+Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (let* ((filename (file-name-nondirectory file))
+             (basedir (file-name-directory (expand-file-name file))))
+        (if (string-match "IMG-\\([0-9]\\{8\\}\\)-WA" filename)
+            (let* ((imgdate (match-string 1 filename))
+                   (newtimestamp (concat imgdate "120000"))
+                   ;; Construct 'rest' similar to the bash script logic
+                   (rest (cond
+                          ((string-match "--IMG-[0-9]\\{8\\}\\(.*\\)$" filename)
+                           (concat "--IMG-" imgdate (match-string 1 filename)))
+                          ((string-match "IMG-[0-9]\\{8\\}\\(.*\\)$" filename)
+                           (concat "--IMG-" imgdate (match-string 1 filename)))
+                          (t (concat "--" filename))))
+                   (newname (concat newtimestamp rest))
+                   (abs-newname (expand-file-name newname basedir))
+                   (date-fmt (format "%s:%s:%s 12:00:00"
+                                     (substring imgdate 0 4)
+                                     (substring imgdate 4 6)
+                                     (substring imgdate 6 8))))
+              (message "Fixing WhatsApp: %s -> %s" filename newname)
+              ;; Set EXIF metadata
+              (transmute--run-command "exiftool" "-overwrite_original"
+                                      (format "-DateTimeOriginal=%s" date-fmt)
+                                      (format "-CreateDate=%s" date-fmt)
+                                      (format "-ModifyDate=%s" date-fmt)
+                                      file)
+              ;; Update filesystem time
+              (transmute--run-command "touch" "-t" (concat imgdate "1200") file)
+              ;; Rename the file
+              (let ((abs-orig (expand-file-name file)))
+                (unless (string= abs-orig abs-newname)
+                  (setq transmute--last-renames (cons (cons abs-orig abs-newname) transmute--last-renames))
+                  (rename-file abs-orig abs-newname t))))
+          (message "Skipping %s: Does not match WhatsApp pattern (IMG-YYYYMMDD-WA...)" filename))))))
+
+;;;###autoload
 (defun transmute-video-slow-down ()
   "Slow down video 5x (removes audio)."
   (interactive)
@@ -986,6 +1115,168 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
              (timestamp (format-time-string "%Y%m%d%H%M%S"))
              (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-slow-" timestamp ".mp4")))
         (transmute-convert-video file dst "-threads" "2" "-an" "-filter:v" "setpts=5*PTS" "-r" "30")))))
+
+;;;###autoload
+(defun transmute-video-concat ()
+  "Concatenate selected video files in sorted order."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (let* ((tmp-file (make-temp-file "transmute-concat-" nil ".txt"))
+           (sorted-targets (sort targets #'string<))
+           (basedir (file-name-directory (expand-file-name (car targets))))
+           (output-file (expand-file-name (format "concat-%s.mp4" (format-time-string "%Y%m%d%H%M%S")) basedir)))
+      (with-temp-file tmp-file
+        (dolist (f sorted-targets)
+          (insert (format "file '%s'\n" (expand-file-name f)))))
+      (let ((cmd (format "ffmpeg -f concat -safe 0 -i %s -c copy %s && rm %s"
+                         (shell-quote-argument tmp-file)
+                         (shell-quote-argument output-file)
+                         (shell-quote-argument tmp-file))))
+        (transmute--run-command-async "Concatenate" cmd)))))
+
+;;;###autoload
+(defun transmute-video-double ()
+  "Double the length of each selected video by repeating it."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((tmp-list (make-temp-file "transmute-double-" nil ".txt"))
+             (base (file-name-nondirectory file))
+             (no-ext (file-name-sans-extension base))
+             (ext (file-name-extension base))
+             (dst (expand-file-name (format "%s-double.%s" no-ext ext) (file-name-directory (expand-file-name file)))))
+        (with-temp-file tmp-list
+          (insert (format "file '%s'\n" (expand-file-name file)))
+          (insert (format "file '%s'\n" (expand-file-name file))))
+        (let ((cmd (format "ffmpeg -f concat -safe 0 -i %s -c copy %s && rm %s"
+                           (shell-quote-argument tmp-list)
+                           (shell-quote-argument dst)
+                           (shell-quote-argument tmp-list))))
+          (transmute--run-command-async (format "Double %s" base) cmd))))))
+
+;;;###autoload
+(defun transmute-video-extract-frames (fps)
+  "Extract frames from video at FPS (default 10)."
+  (interactive (list (read-number "FPS: " 10)))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((basedir (file-name-directory (expand-file-name file)))
+             (frames-dir (expand-file-name "frames" basedir)))
+        (unless (file-directory-p frames-dir)
+          (make-directory frames-dir t))
+        (let ((cmd (format "ffmpeg -y -i %s -vf fps=%d %s/%%07d.jpg"
+                           (shell-quote-argument file)
+                           fps
+                           (shell-quote-argument frames-dir))))
+          (transmute--run-command-async (format "Extract Frames %s" (file-name-nondirectory file)) cmd))))))
+
+;;;###autoload
+(defun transmute-video-set-fps (fps)
+  "Change video framerate to FPS."
+  (interactive "nTarget FPS: ")
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((base (file-name-nondirectory file))
+             (no-ext (file-name-sans-extension base))
+             (ext (file-name-extension base))
+             (dst (expand-file-name (format "%s-fps%d.%s" no-ext fps ext) (file-name-directory (expand-file-name file)))))
+        (transmute-convert-video file dst "-filter:v" (format "fps=fps=%d" fps))))))
+
+;;;###autoload
+(defun transmute-video-from-frames (pattern fps)
+  "Create video from image sequence PATTERN (e.g. img%%03d.jpg) at FPS."
+  (interactive (list (read-string "Frame pattern: " "img%03d.jpg")
+                     (read-number "FPS: " 25)))
+  (let* ((basedir default-directory)
+         (output-file (expand-file-name "out.mp4" basedir)))
+    (let ((cmd (format "ffmpeg -y -start_number 0 -i %s -c:v libx264 -vf \"fps=%d,format=yuv420p\" %s"
+                       (shell-quote-argument pattern)
+                       fps
+                       (shell-quote-argument output-file))))
+      (transmute--run-command-async "Video from Frames" cmd))))
+
+;;;###autoload
+(defun transmute-video-remove-flips ()
+  "Remove rapid camera flips/glitches using scene filter."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((base (file-name-nondirectory file))
+             (no-ext (file-name-sans-extension base))
+             (ext (file-name-extension base))
+             (tmp1 (expand-file-name (format "%s-pass1.%s" no-ext ext) (file-name-directory (expand-file-name file))))
+             (dst (expand-file-name (format "%s-filtered.%s" no-ext ext) (file-name-directory (expand-file-name file)))))
+        (let ((cmd (format "ffmpeg -i %s -vf \"select='lt(scene,0.005)',setpts=N/FRAME_RATE/TB\" -vsync vfr %s && ffmpeg -i %s -vf \"select='lt(scene,0.005)',setpts=N/FRAME_RATE/TB\" -vsync vfr %s && rm %s"
+                           (shell-quote-argument file)
+                           (shell-quote-argument tmp1)
+                           (shell-quote-argument tmp1)
+                           (shell-quote-argument dst)
+                           (shell-quote-argument tmp1))))
+          (transmute--run-command-async (format "Remove Flips %s" base) cmd))))))
+
+;;;###autoload
+(defun transmute-video-replace-audio (audio-file)
+  "Replace video audio with AUDIO-FILE (default newaudio.wav)."
+  (interactive (list (read-file-name "Audio file: " nil "newaudio.wav" t)))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((base (file-name-nondirectory file))
+             (no-ext (file-name-sans-extension base))
+             (ext (file-name-extension base))
+             (dst (expand-file-name (format "%s-newaudio.%s" no-ext ext) (file-name-directory (expand-file-name file)))))
+        (let ((cmd (format "ffmpeg -y -i %s -i %s -map 0:v:0 -map 1:a:0 -c:v copy %s"
+                           (shell-quote-argument file)
+                           (shell-quote-argument audio-file)
+                           (shell-quote-argument dst))))
+          (transmute--run-command-async (format "Replace Audio %s" base) cmd))))))
+
+;;;###autoload
+(defun transmute-video-background-music (music-dir)
+  "Add random background music from MUSIC-DIR to selected videos."
+  (interactive "DMusic directory: ")
+  (when-let ((targets (transmute-get-filtered-targets 'video))
+             (music-files (directory-files music-dir t "\\.mp3$\\|\\.wav$")))
+    (transmute-do-batch targets
+      (let* ((music (nth (random (length music-files)) music-files))
+             (base (file-name-nondirectory file))
+             (no-ext (file-name-sans-extension base))
+             (ext (file-name-extension base))
+             (dst (expand-file-name (format "%s-bgm.%s" no-ext ext) (file-name-directory (expand-file-name file))))
+             (duration (string-to-number (shell-command-to-string (format "ffprobe -v quiet -of csv=p=0 -show_entries format=duration %s" (shell-quote-argument file)))))
+             (fade-duration 5)
+             (fade-start (- duration fade-duration))
+             (cmd (format "ffmpeg -y -i %s -stream_loop -1 -i %s -map 0:v:0 -map 1:a:0 -t %f -af \"afade=t=out:st=%f:d=%d\" -c:v copy %s"
+                          (shell-quote-argument file)
+                          (shell-quote-argument music)
+                          duration
+                          fade-start fade-duration
+                          (shell-quote-argument dst))))
+        (transmute--run-command-async (format "BG Music %s" base) cmd)))))
+
+;;;###autoload
+(defun transmute-video-rescale (width height)
+  "Rescale video to WIDTH x HEIGHT (default 1800x1080)."
+  (interactive (list (read-number "Width: " 1800)
+                     (read-number "Height: " 1080)))
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((base (file-name-nondirectory file))
+             (no-ext (file-name-sans-extension base))
+             (ext (file-name-extension base))
+             (dst (expand-file-name (format "%s-rescaled.%s" no-ext ext) (file-name-directory (expand-file-name file)))))
+        (transmute-convert-video file dst "-vf" (format "scale=%d:%d" width height) "-vcodec" "libx264" "-crf" "23")))))
+
+;;;###autoload
+(defun transmute-video-rotate-ccw ()
+  "Rotate video 90 degrees counter-clockwise."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'video)))
+    (transmute-do-batch targets
+      (let* ((base (file-name-nondirectory file))
+             (no-ext (file-name-sans-extension base))
+             (ext (file-name-extension base))
+             (dst (expand-file-name (format "%s-rotated-ccw.%s" no-ext ext) (file-name-directory (expand-file-name file)))))
+        (transmute-convert-video file dst "-vf" "transpose=2")))))
 
 ;;;###autoload
 (defun transmute-audio-normalise ()
@@ -1061,6 +1352,13 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                      ("Picture Info" . transmute-picture-info)
                      ("Picture Montage" . transmute-picture-montage)
                      ("Picture Organise" . transmute-picture-organise)
+                     ("Picture Fix WhatsApp" . transmute-picture-fix-whatsapp)
+                     ("Picture Email" . transmute-picture-email)
+                     ("Picture From PDF" . transmute-picture-from-pdf)
+                     ("Picture Orientation Reset" . transmute-picture-orientation-reset)
+                     ("Picture Split" . transmute-picture-split)
+                     ("Picture To Capture" . transmute-picture-to-capture)
+                     ("Picture Update to CreateDate" . transmute-picture-update-to-create-date)
                      ("Video Convert" . transmute-video-convert)
                      ("Video Shrink" . transmute-video-shrink)
                      ("Video To GIF" . transmute-video-to-gif)
@@ -1071,6 +1369,16 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                      ("Video Slow Down" . transmute-video-slow-down)
                      ("Video Extract Audio" . transmute-video-extract-audio)
                      ("Video Remove Audio" . transmute-video-remove-audio)
+                     ("Video Replace Audio" . transmute-video-replace-audio)
+                     ("Video Background Music" . transmute-video-background-music)
+                     ("Video Concat" . transmute-video-concat)
+                     ("Video Double" . transmute-video-double)
+                     ("Video Extract Frames" . transmute-video-extract-frames)
+                     ("Video From Frames" . transmute-video-from-frames)
+                     ("Video Remove Flips" . transmute-video-remove-flips)
+                     ("Video Set FPS" . transmute-video-set-fps)
+                     ("Video Rescale" . transmute-video-rescale)
+                     ("Video Rotate CCW" . transmute-video-rotate-ccw)
                      ("Video Info" . transmute-video-info)
                      ("Audio Convert" . transmute-audio-convert)
                      ("Audio Normalise" . transmute-audio-normalise)
@@ -1086,9 +1394,16 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 ;;;###autoload
 (transient-define-prefix transmute-menu ()
   "Main menu for media management utilities."
-  ["Media Processing"
-   ["Image"
+  ["Image Management"
+   ["Basic Ops"
     ("ic" "Convert" transmute-picture-convert)
+    ("iC" "Crop" transmute-picture-crop)
+    ("iS" "Split" transmute-picture-split)
+    ("im" "Montage" transmute-picture-montage)
+    ("ip" "To PDF" transmute-picture-to-pdf)
+    ("id" "From PDF" transmute-picture-from-pdf)
+    ("ii" "Info" transmute-picture-info)]
+   ["Enhance & Process"
     ("iz" "Crush (640px)" transmute-picture-crush)
     ("is" "Scale (1920px)" transmute-picture-scale)
     ("iu" "Upscale (GAN)" transmute-picture-upscale)
@@ -1096,27 +1411,49 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
     ("il" "Rotate Left" transmute-picture-rotate-left)
     ("ib" "Brighten" transmute-picture-correct)
     ("ia" "Auto Colour" transmute-picture-autocolour)
-    ("if" "Update from CreateDate" transmute-picture-update-from-create-date)
-    ("ip" "To PDF" transmute-picture-to-pdf)
-    ("im" "Montage" transmute-picture-montage)
+    ("iO" "Orientation Reset" transmute-picture-orientation-reset)]
+   ["Organisation"
     ("io" "Organise" transmute-picture-organise)
-    ("iC" "Crop" transmute-picture-crop)
-    ("ii" "Info" transmute-picture-info)]
-   ["Video"
+    ("iw" "WhatsApp Fix" transmute-picture-fix-whatsapp)
+    ("iF" "Update from CreateDate" transmute-picture-update-from-create-date)
+    ("iU" "Update to CreateDate" transmute-picture-update-to-create-date)]
+   ["Publish"
+    ("ie" "Email" transmute-picture-email)
+    ("ig" "To Capture" transmute-picture-to-capture)]]
+  ["Video & Audio"
+   ["Video Transform"
     ("vc" "Convert" transmute-video-convert)
     ("vs" "Shrink" transmute-video-shrink)
-    ("vg" "To GIF" transmute-video-to-gif)
-    ("va" "Extract Audio" transmute-video-extract-audio)
-    ("vt" "Top/Tail (Trim)" transmute-video-toptail)
-    ("vk" "Cut" transmute-video-cut)
-    ("vr" "Reverse" transmute-video-reverse)
+    ("ve" "Rescale" transmute-video-rescale)
     ("vR" "Rotate Right" transmute-video-rotate-right)
     ("vL" "Rotate Left" transmute-video-rotate-left)
+    ("vC" "Rotate CCW" transmute-video-rotate-ccw)
+    ("vr" "Reverse" transmute-video-reverse)
+    ("vt" "Top/Tail (Trim)" transmute-video-toptail)
+    ("vk" "Cut" transmute-video-cut)]
+   ["Video Effects"
+    ("vg" "To GIF" transmute-video-to-gif)
     ("v+" "Speed Up" transmute-video-speed-up)
     ("v-" "Slow Down" transmute-video-slow-down)
+    ("vf" "Remove Flips" transmute-video-remove-flips)
+    ("vF" "Set FPS" transmute-video-set-fps)]
+   ["Video Sequence"
+    ("vj" "Concat" transmute-video-concat)
+    ("v2" "Double" transmute-video-double)
+    ("vE" "Extract Frames" transmute-video-extract-frames)
+    ("vI" "From Frames" transmute-video-from-frames)]
+   ["Video Audio"
+    ("va" "Extract Audio" transmute-video-extract-audio)
     ("vx" "Remove Audio" transmute-video-remove-audio)
-    ("vi" "Info" transmute-video-info)]]
-  ["Metadata & Utilities"
+    ("vm" "Replace Audio" transmute-video-replace-audio)
+    ("vB" "Background Music" transmute-video-background-music)]
+   ["Audio"
+    ("ac" "Convert" transmute-audio-convert)
+    ("an" "Normalise" transmute-audio-normalise)
+    ("at" "Trim Silence" transmute-audio-trim-silence)
+    ("ai" "Info" transmute-audio-info)
+    ("vi" "Video Info" transmute-video-info)]]
+  ["Metadata & Global"
    ["Tags"
     ("tt" "Tag (Interactive)" transmute-tag-interactive)
     ("tk" "Tag from List" transmute-tag-from-list)
@@ -1125,12 +1462,7 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
     ("td" "Retag by Date" transmute-retag-by-date)
     ("tc" "Clear Tags" transmute-clear-tags)
     ("ti" "Tag Info" transmute-tag-info)]
-   ["Audio"
-    ("ac" "Convert" transmute-audio-convert)
-    ("an" "Normalise" transmute-audio-normalise)
-    ("at" "Trim Silence" transmute-audio-trim-silence)
-    ("ai" "Info" transmute-audio-info)]
-   ["Menus"
+   ["Utilities"
     ("m" "Completing Read Menu" transmute-completing-read-menu)
     ("L" "Show Log" transmute-show-log)
     ("S" "Stop Conversions" transmute-stop-conversions)]])

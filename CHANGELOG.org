@@ -11,7 +11,18 @@ project's main git repository.
 
 * Versions
 
-** <<22026-05-02 Sat> *0.2.0*
+** <<2026-05-04 Mon>> *0.3.0*
+
+Major feature expansion migrating legacy media processing bash scripts to pure Elisp.
+
+*** Features
+
+- *Image Migrations* -- Added `transmute-picture-montage`, `transmute-picture-organise`, `transmute-picture-fix-whatsapp`, `transmute-picture-email`, `transmute-picture-from-pdf`, `transmute-picture-orientation-reset`, `transmute-picture-split`, `transmute-picture-to-capture`, and `transmute-picture-update-to-create-date`.
+- *Video Migrations* -- Added `transmute-video-concat`, `transmute-video-double`, `transmute-video-extract-frames`, `transmute-video-set-fps`, `transmute-video-from-frames`, `transmute-video-remove-flips`, `transmute-video-replace-audio`, `transmute-video-background-music`, `transmute-video-rescale`, and `transmute-video-rotate-ccw`.
+- *Menu Reorganization* -- Refactored the transient menu into a structured multi-column layout for better navigation of the expanded feature set.
+- *Sidecar Support* -- Improved handling of companion files (e.g., =.xmp=) during organization and renaming tasks.
+
+** <<22026-05-02 Sat>> *0.2.0*
 
 Significant architectural update to support asynchronous non-blocking media processing.
 
