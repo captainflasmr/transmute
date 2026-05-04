@@ -1057,48 +1057,95 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 ;;;###autoload
 (transmute-progress-mode 1)
 
+(defun transmute--image-dired-kill-buffer-query ()
+  "Allow killing *image-dired-display-image* buffers without confirmation.
+Transmute modifies image files externally (rotate, tag, etc.) which
+marks the display buffer as modified.  image-dired-display-image calls
+kill-buffer on it when switching images, triggering a \"Buffer modified;
+kill anyway?\" prompt.  This handler silently clears the modified flag
+so the kill proceeds without prompting.  Always returns t to allow the kill."
+  (when (and (string-match-p "\\`\\*image-dired-display-image\\*"
+                              (buffer-name))
+             (buffer-modified-p))
+    (set-buffer-modified-p nil))
+  t)
+
+(defun transmute--clean-orphaned-locks (files)
+  "Delete orphaned Emacs file-lock symlinks for FILES.
+Locks can be left behind when exiftool or cp -p overwrites a file
+that Emacs had visited, breaking the lock association."
+  (dolist (f files)
+    (let* ((dir (file-name-directory f))
+           (base (file-name-nondirectory f))
+           (lock (expand-file-name (concat ".#" base) dir)))
+      (when (and (file-exists-p lock) (file-symlink-p lock))
+        (delete-file lock)))))
+
 (defun transmute-refresh-thumbnail ()
   "Refresh dired and thumbnail buffers after a transmute batch operation.
 Handles renamed files by updating their visiting buffers and reverts
-affected buffers silently to prevent file-supersession prompts."
+affected buffers silently to prevent file-supersession prompts.
+Clears modified flags and orphaned lock files immediately to avoid
+\"Buffer modified; kill anyway?\" prompts; defers cache refresh."
   (let ((files (mapcar #'expand-file-name transmute-batch-files))
         (renames transmute--last-renames))
+
+    ;; -- Immediate cleanup: must happen before user can interact --
+
+    ;; 1. Clear modified flag on image-dired display buffers so they
+    ;;    can be reused without "kill anyway?" prompts.
+    (dolist (buf (buffer-list))
+      (when (and (buffer-live-p buf)
+                 (string-match-p "\\`\\*image-dired-display-image\\*"
+                                 (buffer-name buf)))
+        (with-current-buffer buf
+          (set-buffer-modified-p nil))))
+
+    ;; 2. Clean orphaned Emacs file-lock symlinks for original and
+    ;;    renamed files (exiftool -overwrite_original_in_place and
+    ;;    cp -p break Emacs file locks).
+    (transmute--clean-orphaned-locks files)
+    (transmute--clean-orphaned-locks (mapcar #'cdr renames))
+
+    ;; -- Deferred refresh: cache/thumb/dired can wait --
     (run-at-time 0.5 nil
       (lambda ()
         (clear-image-cache)
         (when (fboundp 'dired-image-thumbnail-clear-preview-cache)
           (dired-image-thumbnail-clear-preview-cache))
-        
-        ;; 1. Delete associated thumbnails to force regeneration
+
+        ;; 3. Delete associated thumbnails to force regeneration
         (dolist (f files)
           (when (and (boundp 'image-dired-dir)
                      (fboundp 'image-dired-thumb-name))
             (let ((thumb (image-dired-thumb-name f)))
               (when (file-exists-p thumb)
                 (delete-file thumb)))))
-        
-        ;; 2. Synchronize all buffers visiting affected files
+
+        ;; 4. Synchronize all buffers visiting affected files
+        ;;    Skip image-dired display buffers — clearing their modified
+        ;;    flag is enough; refreshing them is handled by image-dired itself.
         (dolist (buf (buffer-list))
           (with-current-buffer buf
-            (let ((bfn (and buffer-file-name (expand-file-name buffer-file-name))))
-              (when bfn
-                (let ((new-name (cdr (assoc bfn renames))))
-                  (cond
-                   ;; Case A: File was renamed
-                   (new-name
-                    (set-visited-file-name new-name nil t)
-                    (revert-buffer nil t))
-                   ;; Case B: File was modified (e.g. rotated) but name kept
-                   ((member bfn files)
-                    (revert-buffer nil t))))))
-            ;; Also revert Dired buffers for directories involved
-            (when (derived-mode-p 'dired-mode)
-              (revert-buffer nil t))))
+            (unless (string-match-p "\\`\\*image-dired-display-image\\*"
+                                    (buffer-name buf))
+              (let ((bfn (and buffer-file-name (expand-file-name buffer-file-name))))
+                (when bfn
+                  (let ((new-name (cdr (assoc bfn renames))))
+                    (cond
+                     (new-name
+                      (set-buffer-modified-p nil)
+                      (set-visited-file-name new-name nil t)
+                      (revert-buffer nil t))
+                     ((member bfn files)
+                      (set-buffer-modified-p nil)
+                      (revert-buffer nil t))))))
+              (when (derived-mode-p 'dired-mode)
+                (revert-buffer nil t)))))
 
-        ;; 3. Refresh the thumbnail view
+        ;; 5. Refresh the thumbnail view
         (if (fboundp 'dired-image-thumbnail-refresh-all)
             (dired-image-thumbnail-refresh-all renames)
-          ;; Manual fallback for legacy dired-image-thumbnail
           (dolist (buf (buffer-list))
             (with-current-buffer buf
               (when (derived-mode-p 'image-dired-thumbnail-mode)
@@ -1108,11 +1155,14 @@ affected buffers silently to prevent file-supersession prompts."
                 (when (fboundp 'dired-image-thumbnail-refresh)
                   (dired-image-thumbnail-refresh))))))
 
-        ;; 4. Finally, refresh the full-size display if active
+        ;; 6. Finally, refresh the full-size display if active
         (when (fboundp 'dired-image-thumbnail-refresh-current-display)
           (dired-image-thumbnail-refresh-current-display))))))
 
 (add-hook 'transmute-after-batch-hook #'transmute-refresh-thumbnail)
+
+(add-hook 'kill-buffer-query-functions
+          #'transmute--image-dired-kill-buffer-query)
 
 ;;;###autoload
 (defun transmute-setup-thumbnail-keys ()
