@@ -1344,8 +1344,8 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                      ("Picture To PDF" . transmute-picture-to-pdf)
                      ("Picture Tag (Interactive)" . transmute-tag-interactive)
                      ("Picture Tag from List" . transmute-tag-from-list)
-                     ("Picture Tag and Rename" . transmute-tag-and-rename)
-                     ("Picture Tag Rename" . transmute-picture-tag-rename)
+                     ("Picture Add Tags & Rename" . transmute-tag-and-rename)
+                     ("Picture Rename from Tags" . transmute-picture-tag-rename)
                      ("Picture Retag by Date" . transmute-retag-by-date)
                      ("Picture Clear Tags" . transmute-clear-tags)
                      ("Picture Tag Info" . transmute-tag-info)
@@ -1457,8 +1457,8 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
    ["Tags"
     ("tt" "Tag (Interactive)" transmute-tag-interactive)
     ("tk" "Tag from List" transmute-tag-from-list)
-    ("tK" "Tag & Rename" transmute-tag-and-rename)
-    ("tn" "Tag Rename" transmute-picture-tag-rename)
+    ("tr" "Add Tags & Rename" transmute-tag-and-rename)
+    ("tR" "Rename from Tags" transmute-picture-tag-rename)
     ("td" "Retag by Date" transmute-retag-by-date)
     ("tc" "Clear Tags" transmute-clear-tags)
     ("ti" "Tag Info" transmute-tag-info)]
