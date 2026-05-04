@@ -1557,6 +1557,8 @@ Clears modified flags and orphaned lock files immediately to avoid
                 (revert-buffer nil t)))))
 
         ;; 5. Refresh the thumbnail view
+        (when (fboundp 'dired-image-thumbnail-invalidate-files)
+          (dired-image-thumbnail-invalidate-files files))
         (if (fboundp 'dired-image-thumbnail-refresh-all)
             (dired-image-thumbnail-refresh-all renames)
           (dolist (buf (buffer-list))
