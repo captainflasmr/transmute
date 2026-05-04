@@ -1483,16 +1483,31 @@ so the kill proceeds without prompting.  Always returns t to allow the kill."
     (set-buffer-modified-p nil))
   t)
 
-(defun transmute--clean-orphaned-locks (files)
-  "Delete orphaned Emacs file-lock symlinks for FILES.
-Locks can be left behind when exiftool or cp -p overwrites a file
-that Emacs had visited, breaking the lock association."
-  (dolist (f files)
-    (let* ((dir (file-name-directory f))
-           (base (file-name-nondirectory f))
-           (lock (expand-file-name (concat ".#" base) dir)))
-      (when (and (file-exists-p lock) (file-symlink-p lock))
-        (delete-file lock)))))
+(defun transmute--clean-orphaned-locks (files &optional directory)
+  "Delete orphaned Emacs file-lock symlinks for FILES or DIRECTORY.
+If DIRECTORY is provided, scan it for all orphaned media locks
+matching the current user's PID pattern."
+  (let ((user-pattern (format "%s@%s" (user-login-name) (system-name))))
+    (if directory
+        (let ((lock-files (directory-files directory t "\\`\\.#" t))
+              (media-exts (append transmute-image-extensions 
+                                  transmute-video-extensions 
+                                  transmute-audio-extensions)))
+          (dolist (lock lock-files)
+            (let* ((base (substring (file-name-nondirectory lock) 2))
+                   (ext (file-name-extension base)))
+              (when (and (member (downcase (or ext "")) media-exts)
+                         (let ((target (file-symlink-p lock)))
+                           (and target (string-prefix-p user-pattern target))))
+                (delete-file lock)))))
+      ;; Individual files mode
+      (dolist (f files)
+        (let* ((f (expand-file-name f))
+               (dir (file-name-directory f))
+               (base (file-name-nondirectory f))
+               (lock (expand-file-name (concat ".#" base) dir)))
+          (when (file-symlink-p lock)
+            (delete-file lock)))))))
 
 (defun transmute-refresh-thumbnail ()
   "Refresh dired and thumbnail buffers after a transmute batch operation.
@@ -1512,13 +1527,8 @@ Clears modified flags and orphaned lock files immediately to avoid
                  (string-match-p "\\`\\*image-dired-display-image\\*"
                                  (buffer-name buf)))
         (with-current-buffer buf
-          (set-buffer-modified-p nil))))
-
-    ;; 2. Clean orphaned Emacs file-lock symlinks for original and
-    ;;    renamed files (exiftool -overwrite_original_in_place and
-    ;;    cp -p break Emacs file locks).
-    (transmute--clean-orphaned-locks files)
-    (transmute--clean-orphaned-locks (mapcar #'cdr renames))
+          (set-buffer-modified-p nil)
+          (unlock-buffer))))
 
     ;; -- Deferred refresh: cache/thumb/dired can wait --
     (run-at-time 0.5 nil
@@ -1549,9 +1559,11 @@ Clears modified flags and orphaned lock files immediately to avoid
                      (new-name
                       (set-buffer-modified-p nil)
                       (set-visited-file-name new-name nil t)
+                      (unlock-buffer)
                       (revert-buffer nil t))
                      ((member bfn files)
                       (set-buffer-modified-p nil)
+                      (unlock-buffer)
                       (revert-buffer nil t))))))
               (when (derived-mode-p 'dired-mode)
                 (revert-buffer nil t)))))
@@ -1572,7 +1584,13 @@ Clears modified flags and orphaned lock files immediately to avoid
 
         ;; 6. Finally, refresh the full-size display if active
         (when (fboundp 'dired-image-thumbnail-refresh-current-display)
-          (dired-image-thumbnail-refresh-current-display))))))
+          (dired-image-thumbnail-refresh-current-display))
+
+        ;; 7. FINAL SWEEP: Clean orphaned Emacs file-lock symlinks
+        (transmute--clean-orphaned-locks files)
+        (transmute--clean-orphaned-locks (mapcar #'cdr renames))
+        (when-let ((batch-dir (and (car files) (file-name-directory (car files)))))
+          (transmute--clean-orphaned-locks nil batch-dir))))))
 
 (add-hook 'transmute-after-batch-hook #'transmute-refresh-thumbnail)
 
