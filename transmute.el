@@ -35,6 +35,9 @@
 (defvar transmute--last-renames nil
   "Alist mapping old filenames to new filenames from the last batch.")
 
+(defvar transmute--inhibit-display-refresh-once nil
+  "Internal flag to skip image display refresh once.")
+
 (defvar transmute-after-batch-hook nil
   "Hook run after each transmute batch operation completes.
 Useful for refreshing external buffers like image-dired thumbnail views.")
@@ -286,7 +289,7 @@ Filters out exiftool warning lines from the output."
 (defun transmute--run-command (cmd &rest args)
   "Run CMD with ARGS and return exit code."
   (let ((full-cmd (mapconcat #'shell-quote-argument (cons cmd args) " ")))
-    (message "Running: %s" full-cmd)
+    (transmute--log "[EXEC] %s" full-cmd)
     (shell-command full-cmd)))
 
 (defun transmute--preserve-metadata (src dst)
@@ -1016,11 +1019,16 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
   "Move selected files into YYYYMM subdirectories and move sidecars (.xmp)."
   (interactive)
   (when-let ((targets (transmute-get-targets)))
+    ;; Pop to log buffer so user sees progress
+    (let ((buf (get-buffer-create transmute-log-buffer-name)))
+      (pop-to-buffer buf)
+      (transmute--log "[START] Organizing %d files..." (length targets)))
+    (setq transmute--inhibit-display-refresh-once t)
     (transmute-do-batch targets
       (let* ((date-info (transmute-get-date file))
              (val (cadr date-info)))
         (if (not date-info)
-            (message "No date found for %s" file)
+            (transmute--log "[WARN] No date found for %s" file)
           (let* ((formatted-date (transmute-format-date val))
                  (year-month (substring formatted-date 0 6))
                  (basedir (file-name-directory (expand-file-name file)))
@@ -1034,7 +1042,8 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
             (let ((abs-orig (expand-file-name file))
                   (abs-new (expand-file-name new-main)))
               (unless (string= abs-orig abs-new)
-                (message "Organizing: %s -> %s" abs-orig abs-new)
+                (transmute--log "[MOVE] %s -> %s" (file-name-nondirectory abs-orig) 
+                                (concat year-month "/" (file-name-nondirectory abs-new)))
                 (setq transmute--last-renames (cons (cons abs-orig abs-new) transmute--last-renames))
                 (rename-file abs-orig abs-new t))
               ;; Move sidecars
@@ -1043,8 +1052,15 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                        (new-s (expand-file-name (file-name-nondirectory s) dest-dir))
                        (new-s-abs (expand-file-name new-s)))
                   (unless (string= s-abs new-s-abs)
+                    (transmute--log "[SIDE] %s -> %s" (file-name-nondirectory s-abs)
+                                    (concat year-month "/" (file-name-nondirectory new-s-abs)))
                     (setq transmute--last-renames (cons (cons s-abs new-s-abs) transmute--last-renames))
-                    (rename-file s-abs new-s-abs t)))))))))))
+                    (rename-file s-abs new-s-abs t)))))))))
+    ;; After organization, hide the stale image display
+    (when (fboundp 'dired-image-thumbnail-hide-display)
+      (dired-image-thumbnail-hide-display))
+    ;; Ensure log buffer remains visible and selected
+    (pop-to-buffer (get-buffer-create transmute-log-buffer-name))))
 
 ;;;###autoload
 (defun transmute-tag-info ()
@@ -1070,6 +1086,10 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'image)))
+    ;; Pop to log buffer
+    (let ((buf (get-buffer-create transmute-log-buffer-name)))
+      (display-buffer buf)
+      (transmute--log "[START] Fixing WhatsApp for %d files..." (length targets)))
     (transmute-do-batch targets
       (let* ((filename (file-name-nondirectory file))
              (basedir (file-name-directory (expand-file-name file))))
@@ -1089,7 +1109,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                                      (substring imgdate 0 4)
                                      (substring imgdate 4 6)
                                      (substring imgdate 6 8))))
-              (message "Fixing WhatsApp: %s -> %s" filename newname)
+              (transmute--log "[FIX] %s -> %s" filename newname)
               ;; Set EXIF metadata
               (transmute--run-command "exiftool" "-overwrite_original"
                                       (format "-DateTimeOriginal=%s" date-fmt)
@@ -1103,7 +1123,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                 (unless (string= abs-orig abs-newname)
                   (setq transmute--last-renames (cons (cons abs-orig abs-newname) transmute--last-renames))
                   (rename-file abs-orig abs-newname t))))
-          (message "Skipping %s: Does not match WhatsApp pattern (IMG-YYYYMMDD-WA...)" filename))))))
+          (transmute--log "[SKIP] %s: Does not match WhatsApp pattern" filename))))))
 
 ;;;###autoload
 (defun transmute-video-slow-down ()
@@ -1516,7 +1536,11 @@ affected buffers silently to prevent file-supersession prompts.
 Clears modified flags and orphaned lock files immediately to avoid
 \"Buffer modified; kill anyway?\" prompts; defers cache refresh."
   (let ((files (mapcar #'expand-file-name transmute-batch-files))
-        (renames transmute--last-renames))
+        (renames transmute--last-renames)
+        (inhibit-display transmute--inhibit-display-refresh-once))
+
+    ;; Clear the flag immediately
+    (setq transmute--inhibit-display-refresh-once nil)
 
     ;; -- Immediate cleanup: must happen before user can interact --
 
@@ -1583,14 +1607,16 @@ Clears modified flags and orphaned lock files immediately to avoid
                   (dired-image-thumbnail-refresh))))))
 
         ;; 6. Finally, refresh the full-size display if active
-        (when (fboundp 'dired-image-thumbnail-refresh-current-display)
+        (when (and (not inhibit-display)
+                   (fboundp 'dired-image-thumbnail-refresh-current-display))
           (dired-image-thumbnail-refresh-current-display))
 
         ;; 7. FINAL SWEEP: Clean orphaned Emacs file-lock symlinks
         (transmute--clean-orphaned-locks files)
         (transmute--clean-orphaned-locks (mapcar #'cdr renames))
         (when-let ((batch-dir (and (car files) (file-name-directory (car files)))))
-          (transmute--clean-orphaned-locks nil batch-dir))))))
+          (transmute--clean-orphaned-locks nil batch-dir))
+        (transmute--log "[FINISH] Batch refresh complete.")))))
 
 (add-hook 'transmute-after-batch-hook #'transmute-refresh-thumbnail)
 
