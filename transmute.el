@@ -312,6 +312,43 @@ Sets Orientation to Normal."
   (format "exiftool -overwrite_original_in_place -Orientation=1 -n -TagsFromFile %s --ExifImageWidth --ExifImageHeight --Orientation %s"
           (shell-quote-argument src) (shell-quote-argument dst)))
 
+(defun transmute--set-processed-xattr (file)
+  "Set user.do_backup.processed xattr on FILE.
+This tells `do_backup` that the file has already been processed
+and should not be rotated or re-processed on the next backup run."
+  (when (executable-find "setfattr")
+    (format "setfattr -n user.do_backup.processed -v 1 %s"
+            (shell-quote-argument (expand-file-name file)))))
+
+;;;###autoload
+(defun transmute-picture-show-xattr ()
+  "Show user.do_backup.processed xattr for selected files.
+Displayed in a dedicated info buffer."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute--display-info targets
+      '("Backup Xattr" . "sh -c 'getfattr -n user.do_backup.processed \"$1\" 2>&1 || echo \"(not set)\"' xattr"))))
+
+;;;###autoload
+(defun transmute-picture-set-xattr (name value)
+  "Set xattr NAME to VALUE on selected files.
+The NAME is completed against known xattr names."
+  (interactive
+   (let ((name (completing-read "Xattr name: "
+                                '("user.do_backup.processed"
+                                  "user.do_backup.skip"
+                                  "user.transmute.processed")
+                                nil nil "user.do_backup.processed")))
+     (list name (read-string (format "Value for %s: " name) "1"))))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (let* ((abs-file (expand-file-name file))
+             (cmd (format "setfattr -n %s -v %s %s"
+                          (shell-quote-argument name)
+                          (shell-quote-argument value)
+                          (shell-quote-argument abs-file))))
+        (transmute--run-command-async (file-name-nondirectory file) cmd)))))
+
 (defun transmute--rotate-image (file degrees)
   "Pixel-rotate FILE by DEGREES using ImageMagick.
 Uses -auto-orient to bake any existing EXIF orientation into the pixels
@@ -320,13 +357,14 @@ written — the result is a pure pixel rotation compatible with all viewers."
   (let* ((file (expand-file-name file))
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension file))))
          (magick-cmd (format "magick %s -auto-orient -rotate %s %s"
-                             (shell-quote-argument file) degrees (shell-quote-argument tmp)))
+                              (shell-quote-argument file) degrees (shell-quote-argument tmp)))
          (strip-orient (format "exiftool -overwrite_original_in_place -Orientation= %s"
-                               (shell-quote-argument tmp)))
+                                (shell-quote-argument tmp)))
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument file) (shell-quote-argument tmp)))
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument file)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (full-cmd (mapconcat #'identity (list magick-cmd strip-orient touch-cmd cp-cmd rm-tmp) " && ")))
+         (xattr-cmd (transmute--set-processed-xattr file))
+         (full-cmd (mapconcat #'identity (delq nil (list magick-cmd strip-orient touch-cmd cp-cmd rm-tmp xattr-cmd)) " && ")))
     (transmute--run-command-async (file-name-nondirectory file) full-cmd)))
 
 ;;; High-level Conversion Helpers
@@ -342,9 +380,10 @@ Preserves metadata and moves SRC to trash."
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (trash-cmd (unless (string= src dst)
-                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
-         (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+          (trash-cmd (unless (string= src dst)
+                       (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+          (xattr-cmd (transmute--set-processed-xattr src))
+          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-image-copy (src dst &rest magick-args)
@@ -358,7 +397,8 @@ Preserves metadata, keeps SRC."
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (full-cmd (mapconcat #'identity (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp) " && ")))
+          (xattr-cmd (transmute--set-processed-xattr dst))
+          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp xattr-cmd)) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 (defun transmute-convert-video (src dst &rest ffmpeg-args)
@@ -388,9 +428,10 @@ Preserves metadata and moves SRC to trash."
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (trash-cmd (unless (string= src dst)
-                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
-         (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd)) " && ")))
+          (trash-cmd (unless (string= src dst)
+                       (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+          (xattr-cmd (transmute--set-processed-xattr src))
+          (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
 
 ;;; Batch / Dired Integration
@@ -728,10 +769,12 @@ Saves to ~/Pictures/YYYYMMDDHH/."
   (when-let ((targets (transmute-get-filtered-targets 'image)))
     (transmute-do-batch targets
       (let* ((cmd (format "exiftool -overwrite_original -orientation#=1 %s && magick %s -auto-orient -strip %s"
-                          (shell-quote-argument file)
-                          (shell-quote-argument file)
-                          (shell-quote-argument file))))
-        (transmute--run-command-async (file-name-nondirectory file) cmd)))))
+                           (shell-quote-argument file)
+                           (shell-quote-argument file)
+                           (shell-quote-argument file)))
+             (xattr-cmd (transmute--set-processed-xattr file))
+             (full-cmd (if xattr-cmd (format "%s && %s" cmd xattr-cmd) cmd)))
+        (transmute--run-command-async (file-name-nondirectory file) full-cmd)))))
 
 ;;;###autoload
 (defun transmute-picture-split (num-splits)
@@ -1422,7 +1465,9 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
     ("im" "Montage" transmute-picture-montage)
     ("ip" "To PDF" transmute-picture-to-pdf)
     ("id" "From PDF" transmute-picture-from-pdf)
-    ("ii" "Info" transmute-picture-info)]
+    ("ii" "Info" transmute-picture-info)
+    ("ix" "Show Backup Xattr" transmute-picture-show-xattr)
+    ("iX" "Set Xattr" transmute-picture-set-xattr)]
    ["Enhance & Process"
     ("iz" "Crush (640px)" transmute-picture-crush)
     ("is" "Scale (1920px)" transmute-picture-scale)
