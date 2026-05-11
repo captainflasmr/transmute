@@ -26,7 +26,7 @@
 (declare-function outline-next-heading "outline")
 (defvar image-dired-thumbnail-mode-map)
 (defvar org-note-abort)
-(defvar org-capture-templates)
+(defvar org-capture-templates nil)
 
 (defgroup transmute nil
   "Media management and conversion utilities."
