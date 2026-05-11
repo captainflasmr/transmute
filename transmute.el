@@ -20,7 +20,13 @@
 (declare-function dired-image-thumbnail--nearest-image-original-file-name "dired-image-thumbnail")
 (declare-function dired-image-thumbnail-clear-preview-cache "dired-image-thumbnail")
 (declare-function dired-image-thumbnail-refresh-current-display "dired-image-thumbnail")
+(declare-function org-time-stamp-format "org")
+(declare-function org-read-date "org")
+(declare-function org-hugo-slug "ox-hugo" (title))
+(declare-function outline-next-heading "outline")
 (defvar image-dired-thumbnail-mode-map)
+(defvar org-note-abort)
+(defvar org-capture-templates)
 
 (defgroup transmute nil
   "Media management and conversion utilities."
@@ -801,14 +807,87 @@ Saves to ~/Pictures/YYYYMMDDHH/."
         (transmute--run-command-async (file-name-nondirectory file)
                                         (mapconcat #'identity (reverse cmds) " && "))))))
 
+(defvar transmute--gallery-marked-files nil
+  "Stores the current gallery marked files for `transmute-gallery-after-finalize'.")
+
+(defvar transmute--gallery-section nil
+  "Stores the section path for the current gallery capture.")
+
 ;;;###autoload
 (defun transmute-picture-to-capture ()
-  "Trigger Org capture gallery with selected files."
+  "Trigger Org capture gallery with selected files.
+Creates a new gallery post using the org-bootstrap-publish
+compatible workflow (EXPORT_HUGO_TYPE: gallery).
+Images are copied to ~/DCIM/content/static/<section>/ and
+PictureCrush is run on them via the :after-finalize hook."
   (interactive)
   (when-let ((targets (transmute-get-targets)))
-    (let ((files-str (mapconcat #'expand-file-name targets ";")))
-      (when (fboundp 'my/external-org-capture-blog-with-gallery)
-        (my/external-org-capture-blog-with-gallery files-str)))))
+    (setq transmute--gallery-marked-files targets)
+    (org-capture nil "g")))
+
+(defun transmute--capture-top-level ()
+  "Move to the top-level heading in the capture buffer."
+  (goto-char (point-min))
+  (or (outline-next-heading)
+      (goto-char (point-max)))
+  (unless (bolp) (insert "\n")))
+
+(defun transmute--gallery-capture-template ()
+  "Generate the gallery capture template string.
+Prompts for date and title, returns an org-mode subtree
+with org-bootstrap-publish compatible properties."
+  (let* ((default-date (format-time-string "%Y-%m-%d" (current-time)))
+         (input-date (read-string (format "Date (%s): " default-date) nil nil default-date))
+         (parsed-date (org-read-date nil t input-date))
+         (date (format-time-string (org-time-stamp-format :inactive) parsed-date))
+         (date-string (format-time-string "%Y-%m-%d" parsed-date))
+         (year-string (format-time-string "%Y" parsed-date))
+         (timestamp-string (format-time-string "%Y%m%d%H%M%S" parsed-date))
+         (title (read-from-minibuffer "Post Title: "))
+         (fname (org-hugo-slug title))
+         (section (concat "blog/" timestamp-string "-blog--" fname)))
+    (setq transmute--gallery-section section)
+    (mapconcat #'identity
+               `(,(concat "* DONE Photos " title " " date-string " :" year-string ":")
+                 ":PROPERTIES:"
+                 ":EXPORT_FILE_NAME: index"
+                 ,(concat ":EXPORT_HUGO_SECTION: " section)
+                 ,(concat ":EXPORT_HUGO_LASTMOD: " date)
+                 ":EXPORT_HUGO_TYPE: gallery"
+                 ,(concat ":EXPORT_HUGO_CUSTOM_FRONT_MATTER+: :thumbnail /" section ".jpg")
+                 ":END:"
+                 "%?\n")
+               "\n")))
+
+(defun transmute-gallery-after-finalize ()
+  "Copy gallery images to static dir and run PictureCrush.
+Called by org-capture's :after-finalize hook after a gallery capture.
+Images are copied to ~/DCIM/content/static/<section>/ and a thumbnail
+is placed at ~/DCIM/content/static/<section>.jpg."
+  (unless org-note-abort
+    (let* ((target-dir (concat "~/DCIM/content/static/" transmute--gallery-section))
+           (files transmute--gallery-marked-files)
+           (thumb (nth (random (length files)) files))
+           (copied-files '()))
+      (make-directory target-dir t)
+      (copy-file thumb (concat "~/DCIM/content/static/" transmute--gallery-section ".jpg"))
+      (dolist (file files)
+        (let ((target-file (expand-file-name (file-name-nondirectory file) target-dir)))
+          (copy-file file target-file)
+          (push target-file copied-files)))
+      (when copied-files
+        (dolist (f copied-files)
+          (transmute-convert-image f f "-auto-orient" "-strip" "-quality" "50%" "-resize" "640x>" "-resize" "x640>")))
+      (setq transmute--gallery-marked-files nil
+            transmute--gallery-section nil))))
+
+(add-to-list 'org-capture-templates
+             '("g" "Gallery" plain
+               (file+function
+                "~/DCIM/content/blog.org"
+                transmute--capture-top-level)
+               (function transmute--gallery-capture-template)
+               :prepend t :jump-to-captured t :after-finalize transmute-gallery-after-finalize))
 
 (defun transmute--known-tags ()
   "Return a list of known tags from `transmute-tag-list-file'."
