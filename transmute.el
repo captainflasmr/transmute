@@ -256,6 +256,18 @@ Filters out exiftool warning lines from the output."
 
 ;;; Internal Process Wrappers
 
+(defun transmute--rename-file-safe (file newname &optional ok-if-already-exists)
+  "Rename FILE to NEWNAME, updating visiting buffers first.
+This prevents \"changed on disk\" prompts from buffers visiting FILE."
+  (let ((old-abs (expand-file-name file))
+        (new-abs (expand-file-name newname)))
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and buffer-file-name
+                   (string= (expand-file-name buffer-file-name) old-abs))
+          (set-visited-file-name new-abs nil t))))
+    (rename-file old-abs new-abs ok-if-already-exists)))
+
 (defun transmute--run-command-async (name cmd &optional callback)
   "Run CMD string asynchronously as NAME.
 Optional CALLBACK is called with (PROCESS EXIT-STATUS) after completion."
@@ -1018,7 +1030,7 @@ TAGS is a comma-separated string or list of tags selected via
                     (cl-incf counter))
                   (unless (string= (expand-file-name final-name) (expand-file-name file))
                     (transmute--log "%s -> %s" file final-name)
-                    (rename-file file final-name)))
+                    (transmute--rename-file-safe file final-name)))
               (message "#### %s : NO CHANGE" file))))))))
 
 ;;;###autoload
@@ -1116,7 +1128,7 @@ TAGS is a comma-separated string or list of tags selected via
               (unless (string= abs-final abs-orig)
                 (message "%s -> %s" abs-orig abs-final)
                 (setq transmute--last-renames (cons (cons abs-orig abs-final) transmute--last-renames))
-                (rename-file abs-orig abs-final)))))))))
+                (transmute--rename-file-safe abs-orig abs-final)))))))))
 
 ;;;###autoload
 (defun transmute-tag-and-rename (tags)
@@ -1167,7 +1179,7 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                        (unless (string= abs-final abs-orig)
                          (message "%s -> %s" abs-orig abs-final)
                          (setq transmute--last-renames (cons (cons abs-orig abs-final) transmute--last-renames))
-                         (rename-file abs-orig abs-final))))))))))))))
+                         (transmute--rename-file-safe abs-orig abs-final))))))))))))))
 
 ;;;###autoload
 (defun transmute-clear-tags ()
@@ -1242,7 +1254,7 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                 (transmute--log "[MOVE] %s -> %s" (file-name-nondirectory abs-orig) 
                                 (concat year-month "/" (file-name-nondirectory abs-new)))
                 (setq transmute--last-renames (cons (cons abs-orig abs-new) transmute--last-renames))
-                (rename-file abs-orig abs-new t))
+                (transmute--rename-file-safe abs-orig abs-new t))
               ;; Move sidecars
               (dolist (s sidecars)
                 (let* ((s-abs (expand-file-name s))
@@ -1252,7 +1264,7 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
                     (transmute--log "[SIDE] %s -> %s" (file-name-nondirectory s-abs)
                                     (concat year-month "/" (file-name-nondirectory new-s-abs)))
                     (setq transmute--last-renames (cons (cons s-abs new-s-abs) transmute--last-renames))
-                    (rename-file s-abs new-s-abs t)))))))))
+                    (transmute--rename-file-safe s-abs new-s-abs t)))))))))
     ;; After organization, hide the stale image display
     (when (fboundp 'dired-image-thumbnail-hide-display)
       (dired-image-thumbnail-hide-display))
@@ -1318,7 +1330,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                      (let ((abs-orig (expand-file-name file)))
                        (unless (string= abs-orig abs-newname)
                          (setq transmute--last-renames (cons (cons abs-orig abs-newname) transmute--last-renames))
-                         (rename-file abs-orig abs-newname t)))))))))
+                         (transmute--rename-file-safe abs-orig abs-newname t)))))))))
           (transmute--log "[SKIP] %s: Does not match WhatsApp pattern" filename)))))
 
 ;;;###autoload
