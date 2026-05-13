@@ -11,6 +11,17 @@ project's main git repository.
 
 * Versions
 
+** <<2026-05-13 Tue>> *0.4.0*
+
+Display buffer integration -- Transmute commands and menu now work from the full-size image display buffer.
+
+*** Features
+
+- *Display Buffer Integration* -- `transmute-menu` (=C-c M=) is now bound and functional inside the =*image-dired-display-image*= buffer. The file shown in the display buffer is automatically detected and used as the target for all transmute operations.
+- *Multi-Backend File Detection* -- New helper `transmute--image-dired-display-file` resolves the displayed file from =buffer-file-name= (full-quality mode) or falls back to the thumbnail buffer's text properties (fast/scaled mode).
+- *Hook-Based Keybinding* -- =C-c M= is injected into display buffers via =special-mode-hook= and =image-dired-image-mode-hook=, covering both the fast/scaled and full-quality display paths.
+- *Updated Setup* -- `transmute-setup-thumbnail-keys` now also binds =C-c M= in =image-dired-display-image-mode-map=.
+
 ** <<2026-05-04 Mon>> *0.3.0*
 
 Major feature expansion migrating legacy media processing bash scripts to pure Elisp.

@@ -3,7 +3,7 @@
 ;; Author: James Dyer <james@dyerdwelling.family>
 ;; Keywords: media, image, video, automation
 ;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (transient "0.3.0"))
-;; Version: 0.1.0
+;; Version: 0.4.0
 
 ;;; Commentary:
 ;; This package provides Emacs Lisp implementations for media processing
@@ -25,6 +25,9 @@
 (declare-function org-hugo-slug "ox-hugo" (title))
 (declare-function outline-next-heading "outline")
 (defvar image-dired-thumbnail-mode-map)
+(defvar image-dired-thumbnail-buffer nil)
+(defvar image-dired-display-image-buffer nil)
+(defvar image-dired-display-image-mode-map nil)
 (defvar org-note-abort)
 (defvar org-capture-templates nil)
 
@@ -442,10 +445,25 @@ Preserves metadata and moves SRC to trash."
 
 ;;; Batch / Dired Integration
 
+(defun transmute--image-dired-display-file ()
+  "Return the original file displayed in the image-dired display buffer.
+Works when the current buffer is *image-dired-display-image* (focused
+from the thumbnail view).  Returns nil if not in a display buffer."
+  (when (string-match-p "\\`\\*image-dired-display-image\\*" (buffer-name))
+    (or buffer-file-name
+        (when-let* ((thumb-buf (and (boundp 'image-dired-thumbnail-buffer)
+                                    (get-buffer image-dired-thumbnail-buffer))))
+          (with-current-buffer thumb-buf
+            (or (and (fboundp 'dired-image-thumbnail--nearest-image-original-file-name)
+                     (dired-image-thumbnail--nearest-image-original-file-name))
+                (and (fboundp 'image-dired-original-file-name)
+                     (image-dired-original-file-name))))))))
+
 (defun transmute-get-targets ()
   "Get list of files to process. 
 If in dired, use marked files or file at point.
 If in image-dired-thumbnail-mode, use marked or file at point.
+If in image-dired-display-image buffer, use the displayed file.
 Otherwise ask for file."
   (cond
    ((derived-mode-p 'dired-mode)
@@ -456,6 +474,8 @@ Otherwise ask for file."
         (and (fboundp 'dired-image-thumbnail--nearest-image-original-file-name)
              (let ((file (dired-image-thumbnail--nearest-image-original-file-name)))
                (when file (list file))))))
+   ((transmute--image-dired-display-file)
+    (list (transmute--image-dired-display-file)))
    (t (list (read-file-name "Process file: ")))))
 
 (defun transmute-get-filtered-targets (type)
@@ -1747,12 +1767,28 @@ Clears modified flags and orphaned lock files immediately to avoid
 (add-hook 'kill-buffer-query-functions
           #'transmute--image-dired-kill-buffer-query)
 
+(defun transmute--setup-display-buffer-keys ()
+  "Set up `transmute-menu' binding in image-dired display buffers.
+Added to `special-mode-hook' and `image-dired-image-mode-hook'
+so that C-c M works in the *image-dired-display-image* buffer
+regardless of whether it uses special-mode (fast/scaled) or
+image-dired-display-image-mode (full quality)."
+  (when (string-match-p "\\`\\*image-dired-display-image\\*" (buffer-name))
+    (local-set-key (kbd "C-c M") #'transmute-menu)))
+
+(add-hook 'special-mode-hook #'transmute--setup-display-buffer-keys)
+(add-hook 'image-dired-image-mode-hook #'transmute--setup-display-buffer-keys)
+
 ;;;###autoload
 (defun transmute-setup-thumbnail-keys ()
-  "Bind `transmute-menu' to C-c M in `image-dired-thumbnail-mode-map'.
-Call this in your init file after loading both packages."
+  "Bind `transmute-menu' to C-c M in image-dired thumbnail and display buffers.
+Call this in your init file after loading both packages.
+Also activates keybindings in the *image-dired-display-image* buffer
+via `special-mode-hook' and `image-dired-image-mode-hook'."
   (when (boundp 'image-dired-thumbnail-mode-map)
-    (define-key image-dired-thumbnail-mode-map (kbd "C-c M") #'transmute-menu)))
+    (define-key image-dired-thumbnail-mode-map (kbd "C-c M") #'transmute-menu))
+  (when (boundp 'image-dired-display-image-mode-map)
+    (define-key image-dired-display-image-mode-map (kbd "C-c M") #'transmute-menu)))
 
 (provide 'transmute)
 
