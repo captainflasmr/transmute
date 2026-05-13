@@ -162,8 +162,7 @@ COMMANDS can be a list of strings or (label . cmd) pairs."
                                              new-fmt)))
         (setq transmute-total-tasks 0
               transmute-completed-tasks 0)))
-    (force-mode-line-update t)
-    (redraw-display)))
+    (force-mode-line-update)))
 
 ;;;###autoload
 (define-minor-mode transmute-progress-mode
@@ -257,42 +256,39 @@ Filters out exiftool warning lines from the output."
 
 ;;; Internal Process Wrappers
 
-(defun transmute--process-sentinel (process _event)
-  "Sentinel for transmute processes."
-  (when (memq (process-status process) '(exit signal))
-    (setq transmute-active-processes (delq process transmute-active-processes))
-    (setq transmute-completed-tasks (1+ transmute-completed-tasks))
-    (let ((buf (process-buffer process))
-          (name (process-name process))
-          (exit-code (process-exit-status process)))
-      (if (zerop exit-code)
-          (progn
-            (transmute--log "[SUCCESS] %s" name)
-            (message "Transmute task finished: %s" name)
-            (when (buffer-live-p buf) (kill-buffer buf)))
-        (transmute--log "[FAILED] %s (exit code %d)" name exit-code)
-        (message "Transmute task FAILED: %s" name)
-        (when (buffer-live-p buf)
-          (transmute--log "--- Output for %s ---" name)
-          (transmute--log "%s" (with-current-buffer buf (buffer-string)))
-          (transmute--log "---------------------" name)
-          (kill-buffer buf))))
-    (when (null transmute-active-processes)
-      (setq transmute-total-tasks 0
-            transmute-completed-tasks 0)
-      (run-hooks 'transmute-after-batch-hook))
-    (transmute--update-progress-display)))
-
-(defun transmute--run-command-async (name cmd)
-  "Run CMD string asynchronously as NAME."
+(defun transmute--run-command-async (name cmd &optional callback)
+  "Run CMD string asynchronously as NAME.
+Optional CALLBACK is called with (PROCESS EXIT-STATUS) after completion."
   (transmute--log "[START] %s: %s" name cmd)
-  (let ((process (start-process-shell-command name 
-                                              (generate-new-buffer (format " *transmute-%s*" name))
-                                              cmd)))
+  (let* ((buf (generate-new-buffer (format " *transmute-%s*" name)))
+         (process (start-process-shell-command name buf cmd)))
     (push process transmute-active-processes)
-    (set-process-sentinel process #'transmute--process-sentinel)
+    (set-process-sentinel
+     process
+     (lambda (proc _event)
+       (when (memq (process-status proc) '(exit signal))
+         (let ((exit-code (process-exit-status proc))
+               (proc-name (process-name proc))
+               (proc-buf (process-buffer proc)))
+           (setq transmute-active-processes (delq proc transmute-active-processes))
+           (setq transmute-completed-tasks (1+ transmute-completed-tasks))
+           (if (zerop exit-code)
+               (transmute--log "[SUCCESS] %s" proc-name)
+             (transmute--log "[FAILED] %s (exit code %d)" proc-name exit-code)
+             (message "Transmute task FAILED: %s" proc-name)
+             (when (buffer-live-p proc-buf)
+               (transmute--log "--- Output for %s ---" proc-name)
+               (transmute--log "%s" (with-current-buffer proc-buf (buffer-string)))
+               (transmute--log "---------------------" proc-name)))
+           (when (buffer-live-p proc-buf)
+             (kill-buffer proc-buf))
+           (when callback (funcall callback proc exit-code))
+           (when (null transmute-active-processes)
+             (setq transmute-total-tasks 0
+                   transmute-completed-tasks 0)
+             (run-hooks 'transmute-after-batch-hook))
+             (transmute--update-progress-display)))))
     (set-process-query-on-exit-flag process nil)
-    (transmute--update-progress-display)
     process))
 
 (defun transmute--run-command (cmd &rest args)
@@ -523,6 +519,45 @@ asynchronous processes are active."
              transmute-completed-tasks 0)
        (run-hooks 'transmute-after-batch-hook))))
 
+(defmacro transmute-do-batch-async (files &rest body)
+  "Process FILES one at a time, asynchronously.
+BODY is evaluated with `file' and `done'.  Call (funcall done)
+when processing for the current file completes."
+  (declare (indent 1))
+  `(let* ((--queue ,files)
+          (--continuation nil))
+     (setq --continuation
+           (lambda ()
+             (if --queue
+                 (let* ((file (pop --queue))
+                        (default-directory (file-name-directory file))
+                        (done (lambda () (run-at-time 0 nil --continuation))))
+                   ,@body)
+               (setq transmute-total-tasks 0
+                     transmute-completed-tasks 0)
+               (run-hooks 'transmute-after-batch-hook))))
+     (setq transmute--last-renames nil)
+     (setq transmute-total-tasks (+ transmute-total-tasks (length --queue))
+           transmute-batch-files (copy-sequence --queue))
+     (funcall --continuation)))
+
+(defmacro transmute-do-batch-parallel (files &rest body)
+  "Process FILES in parallel, asynchronously.
+BODY is evaluated for each FILE.  All files are started at once.
+The after-batch hook runs when all processes finish."
+  (declare (indent 1))
+  `(let ((batch-files ,files))
+     (setq transmute--last-renames nil)
+     (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files))
+           transmute-batch-files batch-files)
+     (dolist (file batch-files)
+       (let ((default-directory (file-name-directory file)))
+         ,@body))
+     (when (null transmute-active-processes)
+       (setq transmute-total-tasks 0
+             transmute-completed-tasks 0)
+       (run-hooks 'transmute-after-batch-hook))))
+
 ;;; Specific Commands
 
 ;;;###autoload
@@ -745,15 +780,19 @@ TAGS is a comma-separated string or list of tags."
            (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
            (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
            (keyword-str (mapconcat #'identity keywords ",")))
-      (transmute-do-batch targets
-        (message "Tagging %s with %s" file tag-str)
-        (transmute--run-command "exiftool" "-P" "-overwrite_original_in_place"
-                                  (format "-TagsList=%s" hier-tag-str)
-                                  (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
-                                  (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
-                                  (format "-XPKeywords=%s" keyword-str)
-                                  (format "-Subject=%s" keyword-str)
-                                  file)))))
+      (transmute-do-batch-parallel targets
+        (transmute--log "[TAG] %s <- %s" file tag-str)
+        (let ((cmd (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s"
+                           (shell-quote-argument (format "-TagsList=%s" hier-tag-str))
+                           (shell-quote-argument (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str))
+                           (shell-quote-argument (format "-HierarchicalSubject=%s"
+                                                         (replace-regexp-in-string "/" "|" hier-tag-str)))
+                           (shell-quote-argument (format "-XPKeywords=%s" keyword-str))
+                           (shell-quote-argument (format "-Subject=%s" keyword-str))
+                           (shell-quote-argument file))))
+          (transmute--run-command-async (file-name-nondirectory file) cmd
+                                          (lambda (_proc _exit-code)
+                                            (transmute--log "[DONE] %s" file))))))))
 
 ;;;###autoload
 (defun transmute-picture-email ()
@@ -929,16 +968,20 @@ TAGS is a comma-separated string or list of tags selected via
            (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
            (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
            (keyword-str (mapconcat #'identity keywords ",")))
-      (transmute-do-batch targets
-        (message "Tagging %s with %s" file tag-str)
-        (transmute--run-command "exiftool" "-P" "-overwrite_original_in_place"
-                                  (format "-TagsList=%s" hier-tag-str)
-                                  (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
-                                  (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
-                                  (format "-XPKeywords=%s" keyword-str)
-                                  (format "-Subject=%s" keyword-str)
-                                  (format "-Keywords=%s" keyword-str)
-                                  file)))))
+      (transmute-do-batch-parallel targets
+        (transmute--log "[TAG] %s <- %s" file tag-str)
+        (let ((cmd (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s %s"
+                           (shell-quote-argument (format "-TagsList=%s" hier-tag-str))
+                           (shell-quote-argument (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str))
+                           (shell-quote-argument (format "-HierarchicalSubject=%s"
+                                                         (replace-regexp-in-string "/" "|" hier-tag-str)))
+                           (shell-quote-argument (format "-XPKeywords=%s" keyword-str))
+                           (shell-quote-argument (format "-Subject=%s" keyword-str))
+                           (shell-quote-argument (format "-Keywords=%s" keyword-str))
+                           (shell-quote-argument file))))
+          (transmute--run-command-async (file-name-nondirectory file) cmd
+                                          (lambda (_proc _exit-code)
+                                            (transmute--log "[DONE] %s" file))))))))
 
 ;;;###autoload
 (defun transmute-retag-by-date ()
@@ -974,7 +1017,7 @@ TAGS is a comma-separated string or list of tags selected via
                                        (format "%s/%s%d.%s" basedir new-base counter ext)))
                     (cl-incf counter))
                   (unless (string= (expand-file-name final-name) (expand-file-name file))
-                    (message "%s -> %s" file final-name)
+                    (transmute--log "%s -> %s" file final-name)
                     (rename-file file final-name)))
               (message "#### %s : NO CHANGE" file))))))))
 
@@ -1089,49 +1132,61 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
            (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
            (keyword-str (mapconcat #'identity keywords ","))
            (formatted-tags (replace-regexp-in-string "/" "@" (replace-regexp-in-string "," "-" hier-tag-str))))
-      (transmute-do-batch targets
-        (message "Tagging %s with %s" file tag-str)
-        (transmute--run-command "exiftool" "-P" "-overwrite_original_in_place"
-                                  (format "-TagsList=%s" hier-tag-str)
-                                  (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str)
-                                  (format "-HierarchicalSubject=%s" (replace-regexp-in-string "/" "|" hier-tag-str))
-                                  (format "-XPKeywords=%s" keyword-str)
-                                  (format "-Subject=%s" keyword-str)
-                                  (format "-Keywords=%s" keyword-str)
-                                  file)
-        (let* ((date-info (transmute-get-date file))
-               (val (cadr date-info)))
-          (when date-info
-            (let* ((formatted-date (transmute-format-date val))
-                   (parsed (transmute--parse-filename file))
-                   (label (cdr (assoc 'label parsed)))
-                   (ext (cdr (assoc 'extension parsed)))
-                   (basedir (cdr (assoc 'directory parsed)))
-                   (new-base (format "%s--%s" formatted-date label))
-                   (new-name (format "%s/%s__%s.%s" basedir new-base formatted-tags ext))
-                   (final-name new-name)
-                   (counter 1))
-              (while (file-exists-p final-name)
-                (setq final-name (format "%s/%s%d__%s.%s" basedir new-base counter formatted-tags ext))
-                (cl-incf counter))
-              (let ((abs-final (expand-file-name final-name basedir))
-                    (abs-orig (expand-file-name file)))
-                (unless (string= abs-final abs-orig)
-                  (message "%s -> %s" abs-orig abs-final)
-                  (setq transmute--last-renames (cons (cons abs-orig abs-final) transmute--last-renames))
-                  (rename-file abs-orig abs-final))))))))))
+      (transmute-do-batch-parallel targets
+        (transmute--log "[TAG] %s <- %s" file tag-str)
+        (let ((cmd (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s %s"
+                           (shell-quote-argument (format "-TagsList=%s" hier-tag-str))
+                           (shell-quote-argument (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str))
+                           (shell-quote-argument (format "-HierarchicalSubject=%s"
+                                                         (replace-regexp-in-string "/" "|" hier-tag-str)))
+                           (shell-quote-argument (format "-XPKeywords=%s" keyword-str))
+                           (shell-quote-argument (format "-Subject=%s" keyword-str))
+                           (shell-quote-argument (format "-Keywords=%s" keyword-str))
+                           (shell-quote-argument file))))
+          (transmute--run-command-async
+           (file-name-nondirectory file) cmd
+           (lambda (_proc exit-code)
+             (when (zerop exit-code)
+               (let* ((date-info (transmute-get-date file))
+                      (val (cadr date-info)))
+                 (when date-info
+                   (let* ((formatted-date (transmute-format-date val))
+                          (parsed (transmute--parse-filename file))
+                          (label (cdr (assoc 'label parsed)))
+                          (ext (cdr (assoc 'extension parsed)))
+                          (basedir (cdr (assoc 'directory parsed)))
+                          (new-base (format "%s--%s" formatted-date label))
+                          (new-name (format "%s/%s__%s.%s" basedir new-base formatted-tags ext))
+                          (final-name new-name)
+                          (counter 1))
+                     (while (file-exists-p final-name)
+                       (setq final-name (format "%s/%s%d__%s.%s" basedir new-base counter formatted-tags ext))
+                       (cl-incf counter))
+                     (let ((abs-final (expand-file-name final-name basedir))
+                           (abs-orig (expand-file-name file)))
+                       (unless (string= abs-final abs-orig)
+                         (message "%s -> %s" abs-orig abs-final)
+                         (setq transmute--last-renames (cons (cons abs-orig abs-final) transmute--last-renames))
+                         (rename-file abs-orig abs-final))))))))))))))
 
 ;;;###autoload
 (defun transmute-clear-tags ()
   "Remove all tags from selected media files."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'any)))
-    (transmute-do-batch targets
-      (message "Clearing tags from %s" file)
-      (transmute--run-command "exiftool" "-P" "-overwrite_original_in_place"
-                                "-TagsList=" "-XMP-microsoft:LastKeywordXMP="
-                                "-HierarchicalSubject=" "-XPKeywords="
-                                "-Subject=" "-Keywords=" file))))
+    (transmute-do-batch-parallel targets
+      (transmute--log "[CLEAR] %s" file)
+      (let ((cmd (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s %s"
+                         (shell-quote-argument "-TagsList=")
+                         (shell-quote-argument "-XMP-microsoft:LastKeywordXMP=")
+                         (shell-quote-argument "-HierarchicalSubject=")
+                         (shell-quote-argument "-XPKeywords=")
+                         (shell-quote-argument "-Subject=")
+                         (shell-quote-argument "-Keywords=")
+                         (shell-quote-argument file))))
+        (transmute--run-command-async (file-name-nondirectory file) cmd
+                                        (lambda (_proc _exit-code)
+                                          (transmute--log "[DONE] %s" file)))))))
 
 (defun transmute--exif-field (file field)
   "Return exiftool FIELD value for FILE, or nil if empty."
@@ -1228,17 +1283,15 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'image)))
-    ;; Pop to log buffer
     (let ((buf (get-buffer-create transmute-log-buffer-name)))
       (display-buffer buf)
       (transmute--log "[START] Fixing WhatsApp for %d files..." (length targets)))
-    (transmute-do-batch targets
+    (transmute-do-batch-parallel targets
       (let* ((filename (file-name-nondirectory file))
              (basedir (file-name-directory (expand-file-name file))))
         (if (string-match "IMG-\\([0-9]\\{8\\}\\)-WA" filename)
             (let* ((imgdate (match-string 1 filename))
                    (newtimestamp (concat imgdate "120000"))
-                   ;; Construct 'rest' similar to the bash script logic
                    (rest (cond
                           ((string-match "--IMG-[0-9]\\{8\\}\\(.*\\)$" filename)
                            (concat "--IMG-" imgdate (match-string 1 filename)))
@@ -1252,20 +1305,21 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                                      (substring imgdate 4 6)
                                      (substring imgdate 6 8))))
               (transmute--log "[FIX] %s -> %s" filename newname)
-              ;; Set EXIF metadata
-              (transmute--run-command "exiftool" "-overwrite_original"
-                                      (format "-DateTimeOriginal=%s" date-fmt)
-                                      (format "-CreateDate=%s" date-fmt)
-                                      (format "-ModifyDate=%s" date-fmt)
-                                      file)
-              ;; Update filesystem time
-              (transmute--run-command "touch" "-t" (concat imgdate "1200") file)
-              ;; Rename the file
-              (let ((abs-orig (expand-file-name file)))
-                (unless (string= abs-orig abs-newname)
-                  (setq transmute--last-renames (cons (cons abs-orig abs-newname) transmute--last-renames))
-                  (rename-file abs-orig abs-newname t))))
-          (transmute--log "[SKIP] %s: Does not match WhatsApp pattern" filename))))))
+              (let ((cmd (format "exiftool -overwrite_original %s %s %s %s"
+                                 (shell-quote-argument (format "-DateTimeOriginal=%s" date-fmt))
+                                 (shell-quote-argument (format "-CreateDate=%s" date-fmt))
+                                 (shell-quote-argument (format "-ModifyDate=%s" date-fmt))
+                                 (shell-quote-argument file))))
+                (transmute--run-command-async
+                 (file-name-nondirectory file) cmd
+                 (lambda (_proc exit-code)
+                   (when (zerop exit-code)
+                     (transmute--run-command "touch" "-t" (concat imgdate "1200") file)
+                     (let ((abs-orig (expand-file-name file)))
+                       (unless (string= abs-orig abs-newname)
+                         (setq transmute--last-renames (cons (cons abs-orig abs-newname) transmute--last-renames))
+                         (rename-file abs-orig abs-newname t)))))))))
+          (transmute--log "[SKIP] %s: Does not match WhatsApp pattern" filename)))))
 
 ;;;###autoload
 (defun transmute-video-slow-down ()
