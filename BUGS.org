@@ -10,4 +10,3 @@ This document contains the current bugs/improvements, this is just for me mainly
 
 * Bugs/Improvements
 
-** TODO to work on a standard image mode from dired
