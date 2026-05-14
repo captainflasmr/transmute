@@ -484,6 +484,8 @@ Otherwise ask for file."
                (when file (list file))))))
    ((transmute--image-dired-display-file)
     (list (transmute--image-dired-display-file)))
+   ((derived-mode-p 'image-mode)
+    (when buffer-file-name (list buffer-file-name)))
    (t (list (read-file-name "Process file: ")))))
 
 (defun transmute-get-filtered-targets (type)
@@ -1834,16 +1836,16 @@ Clears modified flags and orphaned lock files immediately to avoid
           #'transmute--image-dired-kill-buffer-query)
 
 (defun transmute--setup-display-buffer-keys ()
-  "Set up `transmute-menu' binding in image-dired display buffers.
-Added to `special-mode-hook' and `image-dired-image-mode-hook'
-so that C-c M works in the *image-dired-display-image* buffer
-regardless of whether it uses special-mode (fast/scaled) or
-image-dired-display-image-mode (full quality)."
-  (when (string-match-p "\\`\\*image-dired-display-image\\*" (buffer-name))
+  "Set up `transmute-menu' binding in image-dired display and image-mode buffers.
+Added to `special-mode-hook', `image-dired-image-mode-hook', and `image-mode-hook'
+so that C-c I works in the *image-dired-display-image* buffer and image-mode buffers."
+  (when (or (string-match-p "\\`\\*image-dired-display-image\\*" (buffer-name))
+            (derived-mode-p 'image-mode))
     (local-set-key (kbd "C-c I") #'transmute-menu)))
 
 (add-hook 'special-mode-hook #'transmute--setup-display-buffer-keys)
 (add-hook 'image-dired-image-mode-hook #'transmute--setup-display-buffer-keys)
+(add-hook 'image-mode-hook #'transmute--setup-display-buffer-keys)
 
 ;;;###autoload
 (defun transmute-setup-thumbnail-keys ()
