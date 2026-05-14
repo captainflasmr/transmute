@@ -17,7 +17,7 @@ Designed for Dired users, Transmute allows you to batch process images, videos, 
 - *Intelligent Filtering:* Commands automatically filter your selection to relevant files (e.g., Image commands only target images), allowing you to safely trigger batch operations on mixed-media folders.
 - *Async Engine:* All operations run asynchronously in the background with automatic cleanup of temporary files.
 - *Status:* Real-time progress tracking in the Emacs =header-line= and centralized logging in the =*transmute-log*= buffer.
-- *Interface:* Reorganized multi-column *Transient* menu (grouped by operation type) and a *Completing-Read* menu.
+- *Interface:* Compact dispatch-oriented *Transient* menu with nested sub-transients (Image, Video, Audio, Tags), plus a *Completing-Read* menu as an alternative.
 
 * Dependencies
 
@@ -57,6 +57,59 @@ In any Dired buffer or the =*image-dired-display-image*= buffer:
 When focused on the full-size display buffer (=*image-dired-display-image*=), the displayed file is automatically used as the target.
 
 If no files are marked, Transmute will operate on the file at point.
+
+** Menu Structure
+
+The =transmute-menu= is a nested transient with a compact 2-row dispatch:
+
+#+begin_example
+Transmute:   i  v  a  t
+Utilities:   m  L  S
+#+end_example
+
+=Image= (=i=) -- 6 columns, 5 rows:
+
+#+begin_example
+ Image: Basic           Meta              Enhance          Colour        Organise            Share
+       c Convert      d From PDF        z Crush (640px)  b Brighten    o Organise          e Email
+       C Crop         i Info            s Scale (1920px) a Auto Colour w WhatsApp Fix      g To Capture
+       S Split        x Show Backup ... u Upscale (GAN)  O Orientation F Update from CD
+       m Montage      X Set Xattr       r Rotate Right                 U Update to CD
+       p To PDF                         l Rotate Left
+#+end_example
+
+=Video= (=v=) -- 5 columns, 5 rows:
+
+#+begin_example
+ Video: Convert          Trim                 Effects            Sequence          Audio
+       c Convert        C Rotate CCW        g To GIF           j Concat          a Extract Audio
+       s Shrink         r Reverse           + Speed Up         2 Double          x Remove Audio
+       e Rescale        t Top/Tail (Trim)   - Slow Down        E Extract Frames  m Replace Audio
+       R Rotate Right   k Cut               f Remove Flips     I From Frames     B Background Music
+       L Rotate Left                        F Set FPS
+#+end_example
+
+=Audio= (=a=) -- 1 column, 5 rows:
+
+#+begin_example
+ Audio: c Convert
+       n Normalise
+       t Trim Silence
+       i Info
+       I Video Info
+#+end_example
+
+=Tags= (=t=) -- 2 columns, 4 rows:
+
+#+begin_example
+ Tags:          Clean:
+     t Tag (Interactive)  d Retag by Date
+     k Tag from List      c Clear Tags
+     r Add Tags & Rename  i Tag Info
+     R Rename from Tags
+#+end_example
+
+Press =q= or =C-g= at any sub-transient to return to the main menu.
 
 ** Monitoring Progress
 - Check the top of your windows for the progress bar: =[Transmuting: 5/10 (50%)]=

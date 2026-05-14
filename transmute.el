@@ -1621,83 +1621,100 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
 
 ;;; Transient Menu
 
+(transient-define-prefix transmute-image-menu ()
+  ["Image"
+   ["Basic"
+    ("c" "Convert" transmute-picture-convert)
+    ("C" "Crop" transmute-picture-crop)
+    ("S" "Split" transmute-picture-split)
+    ("m" "Montage" transmute-picture-montage)
+    ("p" "To PDF" transmute-picture-to-pdf)]
+   ["Meta"
+    ("d" "From PDF" transmute-picture-from-pdf)
+    ("i" "Info" transmute-picture-info)
+    ("x" "Show Backup Xattr" transmute-picture-show-xattr)
+    ("X" "Set Xattr" transmute-picture-set-xattr)]
+   ["Enhance"
+    ("z" "Crush (640px)" transmute-picture-crush)
+    ("s" "Scale (1920px)" transmute-picture-scale)
+    ("u" "Upscale (GAN)" transmute-picture-upscale)
+    ("r" "Rotate Right" transmute-picture-rotate-right)
+    ("l" "Rotate Left" transmute-picture-rotate-left)]
+   ["Colour"
+    ("b" "Brighten" transmute-picture-correct)
+    ("a" "Auto Colour" transmute-picture-autocolour)
+    ("O" "Orientation Reset" transmute-picture-orientation-reset)]
+   ["Organise"
+    ("o" "Organise" transmute-picture-organise)
+    ("w" "WhatsApp Fix" transmute-picture-fix-whatsapp)
+    ("F" "Update from CreateDate" transmute-picture-update-from-create-date)
+    ("U" "Update to CreateDate" transmute-picture-update-to-create-date)]
+   ["Share"
+    ("e" "Email" transmute-picture-email)
+    ("g" "To Capture" transmute-picture-to-capture)]])
+
+(transient-define-prefix transmute-video-menu ()
+  ["Video"
+   ["Convert"
+    ("c" "Convert" transmute-video-convert)
+    ("s" "Shrink" transmute-video-shrink)
+    ("e" "Rescale" transmute-video-rescale)
+    ("R" "Rotate Right" transmute-video-rotate-right)
+    ("L" "Rotate Left" transmute-video-rotate-left)]
+   ["Trim"
+    ("C" "Rotate CCW" transmute-video-rotate-ccw)
+    ("r" "Reverse" transmute-video-reverse)
+    ("t" "Top/Tail (Trim)" transmute-video-toptail)
+    ("k" "Cut" transmute-video-cut)]
+   ["Effects"
+    ("g" "To GIF" transmute-video-to-gif)
+    ("+" "Speed Up" transmute-video-speed-up)
+    ("-" "Slow Down" transmute-video-slow-down)
+    ("f" "Remove Flips" transmute-video-remove-flips)
+    ("F" "Set FPS" transmute-video-set-fps)]
+   ["Sequence"
+    ("j" "Concat" transmute-video-concat)
+    ("2" "Double" transmute-video-double)
+    ("E" "Extract Frames" transmute-video-extract-frames)
+    ("I" "From Frames" transmute-video-from-frames)]
+   ["Audio"
+    ("a" "Extract Audio" transmute-video-extract-audio)
+    ("x" "Remove Audio" transmute-video-remove-audio)
+    ("m" "Replace Audio" transmute-video-replace-audio)
+    ("B" "Background Music" transmute-video-background-music)]])
+
+(transient-define-prefix transmute-audio-menu ()
+  ["Audio"
+   ("c" "Convert" transmute-audio-convert)
+   ("n" "Normalise" transmute-audio-normalise)
+   ("t" "Trim Silence" transmute-audio-trim-silence)
+   ("i" "Info" transmute-audio-info)
+   ("I" "Video Info" transmute-video-info)])
+
+(transient-define-prefix transmute-tag-menu ()
+  ["Tags"
+   ["Tag"
+    ("t" "Tag (Interactive)" transmute-tag-interactive)
+    ("k" "Tag from List" transmute-tag-from-list)
+    ("r" "Add Tags & Rename" transmute-tag-and-rename)
+    ("R" "Rename from Tags" transmute-picture-tag-rename)]
+   ["Clean"
+    ("d" "Retag by Date" transmute-retag-by-date)
+    ("c" "Clear Tags" transmute-clear-tags)
+    ("i" "Tag Info" transmute-tag-info)]])
+
 ;;;###autoload
 (transient-define-prefix transmute-menu ()
   "Main menu for media management utilities."
-  ["Image Management"
-   ["Basic Ops"
-    ("ic" "Convert" transmute-picture-convert)
-    ("iC" "Crop" transmute-picture-crop)
-    ("iS" "Split" transmute-picture-split)
-    ("im" "Montage" transmute-picture-montage)
-    ("ip" "To PDF" transmute-picture-to-pdf)
-    ("id" "From PDF" transmute-picture-from-pdf)
-    ("ii" "Info" transmute-picture-info)
-    ("ix" "Show Backup Xattr" transmute-picture-show-xattr)
-    ("iX" "Set Xattr" transmute-picture-set-xattr)]
-   ["Enhance & Process"
-    ("iz" "Crush (640px)" transmute-picture-crush)
-    ("is" "Scale (1920px)" transmute-picture-scale)
-    ("iu" "Upscale (GAN)" transmute-picture-upscale)
-    ("ir" "Rotate Right" transmute-picture-rotate-right)
-    ("il" "Rotate Left" transmute-picture-rotate-left)
-    ("ib" "Brighten" transmute-picture-correct)
-    ("ia" "Auto Colour" transmute-picture-autocolour)
-    ("iO" "Orientation Reset" transmute-picture-orientation-reset)]
-   ["Organisation"
-    ("io" "Organise" transmute-picture-organise)
-    ("iw" "WhatsApp Fix" transmute-picture-fix-whatsapp)
-    ("iF" "Update from CreateDate" transmute-picture-update-from-create-date)
-    ("iU" "Update to CreateDate" transmute-picture-update-to-create-date)]
-   ["Publish"
-    ("ie" "Email" transmute-picture-email)
-    ("ig" "To Capture" transmute-picture-to-capture)]]
-  ["Video & Audio"
-   ["Video Transform"
-    ("vc" "Convert" transmute-video-convert)
-    ("vs" "Shrink" transmute-video-shrink)
-    ("ve" "Rescale" transmute-video-rescale)
-    ("vR" "Rotate Right" transmute-video-rotate-right)
-    ("vL" "Rotate Left" transmute-video-rotate-left)
-    ("vC" "Rotate CCW" transmute-video-rotate-ccw)
-    ("vr" "Reverse" transmute-video-reverse)
-    ("vt" "Top/Tail (Trim)" transmute-video-toptail)
-    ("vk" "Cut" transmute-video-cut)]
-   ["Video Effects"
-    ("vg" "To GIF" transmute-video-to-gif)
-    ("v+" "Speed Up" transmute-video-speed-up)
-    ("v-" "Slow Down" transmute-video-slow-down)
-    ("vf" "Remove Flips" transmute-video-remove-flips)
-    ("vF" "Set FPS" transmute-video-set-fps)]
-   ["Video Sequence"
-    ("vj" "Concat" transmute-video-concat)
-    ("v2" "Double" transmute-video-double)
-    ("vE" "Extract Frames" transmute-video-extract-frames)
-    ("vI" "From Frames" transmute-video-from-frames)]
-   ["Video Audio"
-    ("va" "Extract Audio" transmute-video-extract-audio)
-    ("vx" "Remove Audio" transmute-video-remove-audio)
-    ("vm" "Replace Audio" transmute-video-replace-audio)
-    ("vB" "Background Music" transmute-video-background-music)]
-   ["Audio"
-    ("ac" "Convert" transmute-audio-convert)
-    ("an" "Normalise" transmute-audio-normalise)
-    ("at" "Trim Silence" transmute-audio-trim-silence)
-    ("ai" "Info" transmute-audio-info)
-    ("vi" "Video Info" transmute-video-info)]]
-  ["Metadata & Global"
-   ["Tags"
-    ("tt" "Tag (Interactive)" transmute-tag-interactive)
-    ("tk" "Tag from List" transmute-tag-from-list)
-    ("tr" "Add Tags & Rename" transmute-tag-and-rename)
-    ("tR" "Rename from Tags" transmute-picture-tag-rename)
-    ("td" "Retag by Date" transmute-retag-by-date)
-    ("tc" "Clear Tags" transmute-clear-tags)
-    ("ti" "Tag Info" transmute-tag-info)]
-   ["Utilities"
-    ("m" "Completing Read Menu" transmute-completing-read-menu)
-    ("L" "Show Log" transmute-show-log)
-    ("S" "Stop Conversions" transmute-stop-conversions)]])
+  ["Transmute"
+   ("i" "Image Commands" transmute-image-menu)
+   ("v" "Video Commands" transmute-video-menu)
+   ("a" "Audio Commands" transmute-audio-menu)
+   ("t" "Tag Commands" transmute-tag-menu)]
+  ["Utilities"
+   ("m" "Completing Read Menu" transmute-completing-read-menu)
+   ("L" "Show Log" transmute-show-log)
+   ("S" "Stop Conversions" transmute-stop-conversions)])
 
 ;;;###autoload
 (transmute-progress-mode 1)

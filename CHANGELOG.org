@@ -11,6 +11,16 @@ project's main git repository.
 
 * Versions
 
+** <<2026-05-14 Thu>> *0.5.0*
+
+Compact transient layout -- The main menu is reduced from a towering 3-row block to a 2-row dispatch with nested sub-transients.
+
+*** Features
+
+- *Nested Transient Architecture* -- The monolithic 3-row transient is refactored into a compact dispatch menu with 4 focused sub-transients (=i= Image, =v= Video, =a= Audio, =t= Tags), each fitting in ~5 lines.
+
+- *Single-Row Sub-Transients* -- Each nested menu uses Transient's column layout to display all commands in a single horizontal row of grouped columns, eliminating vertical stacking.
+
 ** <<2026-05-13 Tue>> *0.4.0*
 
 Display buffer integration -- Transmute commands and menu now work from the full-size image display buffer.
