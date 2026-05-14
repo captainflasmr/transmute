@@ -1840,7 +1840,7 @@ so that C-c M works in the *image-dired-display-image* buffer
 regardless of whether it uses special-mode (fast/scaled) or
 image-dired-display-image-mode (full quality)."
   (when (string-match-p "\\`\\*image-dired-display-image\\*" (buffer-name))
-    (local-set-key (kbd "C-c M") #'transmute-menu)))
+    (local-set-key (kbd "C-c I") #'transmute-menu)))
 
 (add-hook 'special-mode-hook #'transmute--setup-display-buffer-keys)
 (add-hook 'image-dired-image-mode-hook #'transmute--setup-display-buffer-keys)
@@ -1852,9 +1852,9 @@ Call this in your init file after loading both packages.
 Also activates keybindings in the *image-dired-display-image* buffer
 via `special-mode-hook' and `image-dired-image-mode-hook'."
   (when (boundp 'image-dired-thumbnail-mode-map)
-    (define-key image-dired-thumbnail-mode-map (kbd "C-c M") #'transmute-menu))
+    (define-key image-dired-thumbnail-mode-map (kbd "C-c I") #'transmute-menu))
   (when (boundp 'image-dired-display-image-mode-map)
-    (define-key image-dired-display-image-mode-map (kbd "C-c M") #'transmute-menu)))
+    (define-key image-dired-display-image-mode-map (kbd "C-c I") #'transmute-menu)))
 
 (provide 'transmute)
 
