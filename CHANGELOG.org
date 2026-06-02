@@ -11,6 +11,17 @@ project's main git repository.
 
 * Versions
 
+** <<2026-06-02 Tue>> *0.6.0*
+
+Filename normalisation -- New command to scrub spaces and shell/glob-unsafe characters from filenames.
+
+*** Features
+
+- *Filename Normalisation* -- Added `transmute-normalise-names`, which renames the selected files to safe, glob-friendly names: whitespace runs collapse to a single dash, diacritics are stripped (e.g. =Café= becomes =Cafe=), and shell/glob-unsafe characters (=* ? [ ] { } ( ) & ; ' " | < >= etc.) are replaced with dashes. The directory and extension are preserved, name collisions get a numeric suffix, and the conventional =--= / =__= / =@= separators are left intact so already-conforming names are skipped.
+- *Any File Type* -- Unlike most commands, normalisation operates on any selected file, not just media, and is wired into the existing batch/log/rename infrastructure so thumbnail views refresh after renames.
+- *Optional Downcasing* -- New `transmute-normalise-downcase' option also lowercases names when enabled.
+- *Menu Integration* -- Available from the main menu Utilities group (=n=), the Image transient's Organise group (=n=), and the completing-read menu.
+
 ** <<2026-05-14 Thu>> *0.5.0*
 
 Compact transient layout -- The main menu is reduced from a towering 3-row block to a 2-row dispatch with nested sub-transients.

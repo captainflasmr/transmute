@@ -3,7 +3,7 @@
 ;; Author: James Dyer <james@dyerdwelling.family>
 ;; Keywords: media, image, video, automation
 ;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (transient "0.3.0"))
-;; Version: 0.4.0
+;; Version: 0.6.0
 
 ;;; Commentary:
 ;; This package provides Emacs Lisp implementations for media processing
@@ -15,6 +15,7 @@
 (require 'cl-lib)
 (require 'dired)
 (require 'transient)
+(require 'ucs-normalize)
 
 (declare-function dired-image-thumbnail-get-marked "dired-image-thumbnail")
 (declare-function dired-image-thumbnail--nearest-image-original-file-name "dired-image-thumbnail")
@@ -174,6 +175,11 @@ COMMANDS can be a list of strings or (label . cmd) pairs."
 (defcustom transmute-trash-command "trash-put"
   "Command to use for trashing files."
   :type 'string
+  :group 'transmute)
+
+(defcustom transmute-normalise-downcase nil
+  "When non-nil, `transmute-normalise-names' also lowercases filenames."
+  :type 'boolean
   :group 'transmute)
 
 (defvar transmute-image-extensions
@@ -1273,6 +1279,59 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
     ;; Ensure log buffer remains visible and selected
     (pop-to-buffer (get-buffer-create transmute-log-buffer-name))))
 
+(defun transmute--normalise-string (name)
+  "Return NAME with whitespace and shell/glob-unsafe characters replaced.
+Diacritics are stripped (e.g. \"é\" becomes \"e\"), runs of whitespace
+become a single dash, and any character outside the safe set
+[A-Za-z0-9._@-] becomes a dash.  Existing \"--\" and \"__\" separators
+are preserved.  Leading and trailing dashes are trimmed.  When
+`transmute-normalise-downcase' is non-nil the result is lowercased."
+  (let* ((decomposed (ucs-normalize-NFD-string name))
+         ;; Drop combining diacritical marks left by NFD decomposition.
+         (stripped (replace-regexp-in-string "[̀-ͯ]" "" decomposed))
+         ;; Collapse any run of whitespace to a single dash.
+         (despaced (replace-regexp-in-string "[[:space:]]+" "-" stripped))
+         ;; Replace every remaining unsafe character with a dash.
+         (safe (replace-regexp-in-string "[^A-Za-z0-9._@-]" "-" despaced))
+         ;; Trim leading and trailing dashes.
+         (trimmed (replace-regexp-in-string "\\(?:\\`-+\\|-+\\'\\)" "" safe)))
+    (if transmute-normalise-downcase (downcase trimmed) trimmed)))
+
+;;;###autoload
+(defun transmute-normalise-names ()
+  "Rename selected files to safe, glob-friendly names.
+Spaces become dashes and shell/glob-unsafe characters (parentheses,
+brackets, quotes, ampersands, semicolons, etc.) are replaced with
+dashes, while the directory and extension are preserved.  Operates on
+any file type, not just media.  On a name collision a numeric suffix is
+appended.  Files whose names are already clean are left untouched."
+  (interactive)
+  (when-let ((targets (transmute-get-targets)))
+    (transmute-do-batch targets
+      (let* ((abs-orig (expand-file-name file))
+             (basedir (file-name-directory abs-orig))
+             (filename (file-name-nondirectory abs-orig))
+             (ext (file-name-extension filename))
+             (base (file-name-sans-extension filename))
+             (new-base (transmute--normalise-string base))
+             (new-base (if (string-empty-p new-base) "unnamed" new-base))
+             (new-name (if ext (format "%s.%s" new-base ext) new-base))
+             (final-name new-name)
+             (counter 1))
+        (while (and (file-exists-p (expand-file-name final-name basedir))
+                    (not (string= final-name filename)))
+          (setq final-name (if ext
+                               (format "%s-%d.%s" new-base counter ext)
+                             (format "%s-%d" new-base counter)))
+          (cl-incf counter))
+        (let ((abs-final (expand-file-name final-name basedir)))
+          (if (string= abs-final abs-orig)
+              (transmute--log "[SKIP] %s (already normalised)" filename)
+            (transmute--log "%s -> %s" filename final-name)
+            (setq transmute--last-renames
+                  (cons (cons abs-orig abs-final) transmute--last-renames))
+            (transmute--rename-file-safe abs-orig abs-final)))))))
+
 ;;;###autoload
 (defun transmute-tag-info ()
   "Show tags and key metadata for selected media files in a summary buffer."
@@ -1582,6 +1641,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                      ("Picture Info" . transmute-picture-info)
                      ("Picture Montage" . transmute-picture-montage)
                      ("Picture Organise" . transmute-picture-organise)
+                     ("Normalise Names" . transmute-normalise-names)
                      ("Picture Fix WhatsApp" . transmute-picture-fix-whatsapp)
                      ("Picture Email" . transmute-picture-email)
                      ("Picture From PDF" . transmute-picture-from-pdf)
@@ -1646,6 +1706,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
     ("O" "Orientation Reset" transmute-picture-orientation-reset)]
    ["Organise"
     ("o" "Organise" transmute-picture-organise)
+    ("n" "Normalise Names" transmute-normalise-names)
     ("w" "WhatsApp Fix" transmute-picture-fix-whatsapp)
     ("F" "Update from CreateDate" transmute-picture-update-from-create-date)
     ("U" "Update to CreateDate" transmute-picture-update-to-create-date)]
@@ -1712,6 +1773,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
    ("a" "Audio Commands" transmute-audio-menu)
    ("t" "Tag Commands" transmute-tag-menu)]
   ["Utilities"
+   ("n" "Normalise Names" transmute-normalise-names)
    ("m" "Completing Read Menu" transmute-completing-read-menu)
    ("L" "Show Log" transmute-show-log)
    ("S" "Stop Conversions" transmute-stop-conversions)])
