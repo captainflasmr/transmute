@@ -1688,7 +1688,8 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
     ("C" "Crop" transmute-picture-crop)
     ("S" "Split" transmute-picture-split)
     ("m" "Montage" transmute-picture-montage)
-    ("p" "To PDF" transmute-picture-to-pdf)]
+    ("p" "To PDF" transmute-picture-to-pdf)
+    ("t" "Get Text (OCR)" transmute-picture-get-text)]
    ["Meta"
     ("d" "From PDF" transmute-picture-from-pdf)
     ("i" "Info" transmute-picture-info)

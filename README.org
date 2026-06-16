@@ -76,6 +76,7 @@ Utilities:   m  L  S
        S Split        x Show Backup ... u Upscale (GAN)  O Orientation F Update from CD
        m Montage      X Set Xattr       r Rotate Right                 U Update to CD
        p To PDF                         l Rotate Left
+       t Get Text (OCR)
 #+end_example
 
 =Video= (=v=) -- 5 columns, 5 rows:
