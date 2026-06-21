@@ -235,23 +235,59 @@ no-tag, timestamp, label, tags-raw, tags, keywords."
       (tags . ,tags)
       (keywords . ,keywords))))
 
+(defvar transmute--date-tags
+  '("CreateDate" "DateTimeOriginal" "ModifyDate" "FileModifyDate")
+  "EXIF date tags queried, in priority order, by `transmute-get-date'.")
+
+(defun transmute--date-command (file)
+  "Return the exiftool command string that reads date tags from FILE."
+  (format "exiftool -s %s %s"
+          (mapconcat (lambda (p) (concat "-" p)) transmute--date-tags " ")
+          (shell-quote-argument (expand-file-name file))))
+
+(defun transmute--parse-date-output (out)
+  "Parse exiftool -s OUT and return the highest-priority (PROP VAL), or nil.
+Priority follows the order of `transmute--date-tags'."
+  (let ((found nil))
+    (dolist (line (split-string out "\n" t))
+      (when (string-match "\\`\\([A-Za-z0-9]+\\)[ \t]*:[ \t]*\\(.*\\)\\'" line)
+        (let ((tag (match-string 1 line))
+              (val (string-trim (match-string 2 line))))
+          (when (and (member tag transmute--date-tags) (not (string-empty-p val)))
+            (push (cons tag val) found)))))
+    (cl-loop for prop in transmute--date-tags
+             for val = (cdr (assoc prop found))
+             when (and val (not (string-empty-p val)))
+             return (list prop val))))
+
 (defun transmute-get-date (file)
   "Get creation date from FILE using exiftool.
-Tries CreateDate, DateTimeOriginal, ModifyDate, and FileModifyDate.
-Filters out exiftool warning lines from the output."
-  (let ((props '("CreateDate" "DateTimeOriginal" "ModifyDate" "FileModifyDate"))
-        (result nil))
-    (cl-loop for prop in props
-             until result
-             do (let ((val (shell-command-to-string
-                            (format "exiftool -s3 -%s %s"
-                                    prop (shell-quote-argument (expand-file-name file))))))
-                  (setq val (string-trim
-                              (replace-regexp-in-string
-                               "^Warning:.*\n\\|Warning:.*$" "" val)))
-                  (unless (string-empty-p val)
-                    (setq result (list prop val)))))
-    result))
+Tries the tags in `transmute--date-tags' in priority order, querying
+them all in a single exiftool invocation.  Returns (PROP VAL) or nil.
+See `transmute-get-date-async' for a non-blocking variant."
+  (transmute--parse-date-output
+   (shell-command-to-string (transmute--date-command file))))
+
+(defun transmute-get-date-async (file callback)
+  "Asynchronously read the date from FILE.
+CALLBACK is called with (PROP VAL) or nil once exiftool completes.
+Does not block Emacs or touch global progress state, so it is safe
+to use inside `transmute-do-batch-async' bodies."
+  (let* ((buf (generate-new-buffer " *transmute-date*"))
+         (proc (start-process-shell-command
+                "transmute-date" buf (transmute--date-command file))))
+    (set-process-query-on-exit-flag proc nil)
+    (set-process-sentinel
+     proc
+     (lambda (p _event)
+       (when (memq (process-status p) '(exit signal))
+         (let* ((pbuf (process-buffer p))
+                (out (if (buffer-live-p pbuf)
+                         (with-current-buffer pbuf (buffer-string))
+                       "")))
+           (when (buffer-live-p pbuf) (kill-buffer pbuf))
+           (funcall callback (transmute--parse-date-output out))))))
+    proc))
 
 (defun transmute-format-date (date-string)
   "Format exiftool date (YYYY:MM:DD HH:MM:SS) to YYYYMMDDHHMMSS."
@@ -308,6 +344,29 @@ Optional CALLBACK is called with (PROCESS EXIT-STATUS) after completion."
              (transmute--update-progress-display)))))
     (set-process-query-on-exit-flag process nil)
     process))
+
+(defun transmute--run-async (cmd callback)
+  "Run shell CMD asynchronously, calling CALLBACK with the exit code.
+Lightweight helper for use inside `transmute-do-batch-async' bodies:
+unlike `transmute--run-command-async' it does not register the process
+in `transmute-active-processes' or touch global progress counters, so
+it will not prematurely trigger `transmute-after-batch-hook'."
+  (transmute--log "[START] %s" cmd)
+  (let* ((buf (generate-new-buffer " *transmute-async*"))
+         (proc (start-process-shell-command "transmute-async" buf cmd)))
+    (set-process-query-on-exit-flag proc nil)
+    (set-process-sentinel
+     proc
+     (lambda (p _event)
+       (when (memq (process-status p) '(exit signal))
+         (let ((code (process-exit-status p))
+               (pbuf (process-buffer p)))
+           (if (zerop code)
+               (transmute--log "[SUCCESS] %s" cmd)
+             (transmute--log "[FAILED] %s (exit %d)" cmd code))
+           (when (buffer-live-p pbuf) (kill-buffer pbuf))
+           (funcall callback code)))))
+    proc))
 
 (defun transmute--run-command (cmd &rest args)
   "Run CMD with ARGS and return exit code."
@@ -694,13 +753,17 @@ The after-batch hook runs when all processes finish."
 
 ;;;###autoload
 (defun transmute-picture-get-text ()
-  "Extract text from images using tesseract OCR."
+  "Extract text from images using tesseract OCR.
+Runs asynchronously so Emacs stays responsive during OCR."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'image)))
-    (transmute-do-batch targets
+    (transmute-do-batch-parallel targets
       (let* ((parsed (transmute--parse-filename file))
-             (out-base (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)))))
-        (transmute--run-command "tesseract" "-l" "eng" file out-base)))))
+             (out-base (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed))))
+             (cmd (format "tesseract -l eng %s %s"
+                          (shell-quote-argument (expand-file-name file))
+                          (shell-quote-argument out-base))))
+        (transmute--run-command-async (file-name-nondirectory file) cmd)))))
 
 ;;;###autoload
 (defun transmute-picture-autocolour ()
@@ -1005,41 +1068,57 @@ TAGS is a comma-separated string or list of tags selected via
 
 ;;;###autoload
 (defun transmute-retag-by-date ()
-  "Rename images based on EXIF creation date."
+  "Rename images based on EXIF creation date.
+Runs asynchronously so Emacs stays responsive during batch processing."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'any)))
-    (transmute-do-batch targets
-      (let* ((date-info (transmute-get-date file))
-             (prop (car date-info))
-             (val (cadr date-info)))
-        (when date-info
-          (when (member prop '("FileModifyDate" "ModifyDate"))
-            (message "Writing %s to CreateDate and DateTimeOriginal for %s" prop file)
-            (shell-command (format "exiftool -P -all= -overwrite_original_in_place \"-CreateDate<%s\" \"-DateTimeOriginal<%s\" %s"
-                                   prop prop (shell-quote-argument file))))
-          (let* ((formatted-date (transmute-format-date val))
-                 (parsed (transmute--parse-filename file))
-                 (current-ts (cdr (assoc 'timestamp parsed)))
-                 (label (cdr (assoc 'label parsed)))
-                 (tags-raw (cdr (assoc 'tags-raw parsed)))
-                 (ext (cdr (assoc 'extension parsed)))
-                 (basedir (cdr (assoc 'directory parsed))))
-            (if (not (string= formatted-date current-ts))
-                (let* ((new-base (format "%s--%s" formatted-date label))
-                       (new-name (if tags-raw
-                                     (format "%s/%s__%s.%s" basedir new-base tags-raw ext)
-                                   (format "%s/%s.%s" basedir new-base ext)))
-                       (final-name new-name)
-                       (counter 1))
-                  (while (file-exists-p final-name)
-                    (setq final-name (if tags-raw
-                                         (format "%s/%s%d__%s.%s" basedir new-base counter tags-raw ext)
-                                       (format "%s/%s%d.%s" basedir new-base counter ext)))
-                    (cl-incf counter))
-                  (unless (string= (expand-file-name final-name) (expand-file-name file))
-                    (transmute--log "%s -> %s" file final-name)
-                    (transmute--rename-file-safe file final-name)))
-              (message "#### %s : NO CHANGE" file))))))))
+    (transmute-do-batch-async targets
+      (transmute-get-date-async
+       file
+       (lambda (date-info)
+         (if (not date-info)
+             (funcall done)
+           (let* ((prop (car date-info))
+                  (val (cadr date-info))
+                  ;; Compute the new name and perform the rename, always
+                  ;; advancing the queue afterwards even if it errors.
+                  (finish
+                   (lambda ()
+                     (unwind-protect
+                         (let* ((formatted-date (transmute-format-date val))
+                                (parsed (transmute--parse-filename file))
+                                (current-ts (cdr (assoc 'timestamp parsed)))
+                                (label (cdr (assoc 'label parsed)))
+                                (tags-raw (cdr (assoc 'tags-raw parsed)))
+                                (ext (cdr (assoc 'extension parsed)))
+                                (basedir (cdr (assoc 'directory parsed))))
+                           (if (not (string= formatted-date current-ts))
+                               (let* ((new-base (format "%s--%s" formatted-date label))
+                                      (new-name (if tags-raw
+                                                    (format "%s/%s__%s.%s" basedir new-base tags-raw ext)
+                                                  (format "%s/%s.%s" basedir new-base ext)))
+                                      (final-name new-name)
+                                      (counter 1))
+                                 (while (file-exists-p final-name)
+                                   (setq final-name (if tags-raw
+                                                        (format "%s/%s%d__%s.%s" basedir new-base counter tags-raw ext)
+                                                      (format "%s/%s%d.%s" basedir new-base counter ext)))
+                                   (cl-incf counter))
+                                 (unless (string= (expand-file-name final-name) (expand-file-name file))
+                                   (transmute--log "%s -> %s" file final-name)
+                                   (transmute--rename-file-safe file final-name)))
+                             (message "#### %s : NO CHANGE" file)))
+                       (funcall done)))))
+             ;; When the date came from a modify-time tag, first bake it
+             ;; into CreateDate/DateTimeOriginal (asynchronously), then rename.
+             (if (member prop '("FileModifyDate" "ModifyDate"))
+                 (progn
+                   (transmute--log "Writing %s to CreateDate and DateTimeOriginal for %s" prop file)
+                   (transmute--run-async
+                    (format "exiftool -P -all= -overwrite_original_in_place \"-CreateDate<%s\" \"-DateTimeOriginal<%s\" %s"
+                            prop prop (shell-quote-argument file))
+                    (lambda (_code) (funcall finish))))
+               (funcall finish)))))))))
 
 ;;;###autoload
 (defun transmute-audio-convert ()
@@ -1233,7 +1312,10 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
 
 ;;;###autoload
 (defun transmute-picture-organise ()
-  "Move selected files into YYYYMM subdirectories and move sidecars (.xmp)."
+  "Move selected files into YYYYMM subdirectories and move sidecars (.xmp).
+Runs asynchronously so Emacs stays responsive during batch processing.
+Progress is shown in the log buffer; the stale image display is hidden
+once the whole batch has finished."
   (interactive)
   (when-let ((targets (transmute-get-targets)))
     ;; Pop to log buffer so user sees progress
@@ -1241,43 +1323,53 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
       (pop-to-buffer buf)
       (transmute--log "[START] Organizing %d files..." (length targets)))
     (setq transmute--inhibit-display-refresh-once t)
-    (transmute-do-batch targets
-      (let* ((date-info (transmute-get-date file))
-             (val (cadr date-info)))
-        (if (not date-info)
-            (transmute--log "[WARN] No date found for %s" file)
-          (let* ((formatted-date (transmute-format-date val))
-                 (year-month (substring formatted-date 0 6))
-                 (basedir (file-name-directory (expand-file-name file)))
-                 (dest-dir (expand-file-name year-month basedir))
-                 (main-name (file-name-nondirectory file))
-                 (new-main (expand-file-name main-name dest-dir))
-                 (sidecars (transmute--get-sidecar-files file)))
-            (unless (file-directory-p dest-dir)
-              (make-directory dest-dir t))
-            ;; Update rename record for main file
-            (let ((abs-orig (expand-file-name file))
-                  (abs-new (expand-file-name new-main)))
-              (unless (string= abs-orig abs-new)
-                (transmute--log "[MOVE] %s -> %s" (file-name-nondirectory abs-orig) 
-                                (concat year-month "/" (file-name-nondirectory abs-new)))
-                (setq transmute--last-renames (cons (cons abs-orig abs-new) transmute--last-renames))
-                (transmute--rename-file-safe abs-orig abs-new t))
-              ;; Move sidecars
-              (dolist (s sidecars)
-                (let* ((s-abs (expand-file-name s))
-                       (new-s (expand-file-name (file-name-nondirectory s) dest-dir))
-                       (new-s-abs (expand-file-name new-s)))
-                  (unless (string= s-abs new-s-abs)
-                    (transmute--log "[SIDE] %s -> %s" (file-name-nondirectory s-abs)
-                                    (concat year-month "/" (file-name-nondirectory new-s-abs)))
-                    (setq transmute--last-renames (cons (cons s-abs new-s-abs) transmute--last-renames))
-                    (transmute--rename-file-safe s-abs new-s-abs t)))))))))
-    ;; After organization, hide the stale image display
-    (when (fboundp 'dired-image-thumbnail-hide-display)
-      (dired-image-thumbnail-hide-display))
-    ;; Ensure log buffer remains visible and selected
-    (pop-to-buffer (get-buffer-create transmute-log-buffer-name))))
+    ;; One-shot finalizer: hide the stale display and resurface the log
+    ;; buffer once the asynchronous batch has fully drained.  Appended so
+    ;; it runs after `transmute-refresh-thumbnail'.
+    (let (finalize)
+      (setq finalize
+            (lambda ()
+              (remove-hook 'transmute-after-batch-hook finalize)
+              (when (fboundp 'dired-image-thumbnail-hide-display)
+                (dired-image-thumbnail-hide-display))
+              (pop-to-buffer (get-buffer-create transmute-log-buffer-name))))
+      (add-hook 'transmute-after-batch-hook finalize t))
+    (transmute-do-batch-async targets
+      (transmute-get-date-async
+       file
+       (lambda (date-info)
+         (unwind-protect
+             (if (not date-info)
+                 (transmute--log "[WARN] No date found for %s" file)
+               (let* ((val (cadr date-info))
+                      (formatted-date (transmute-format-date val))
+                      (year-month (substring formatted-date 0 6))
+                      (basedir (file-name-directory (expand-file-name file)))
+                      (dest-dir (expand-file-name year-month basedir))
+                      (main-name (file-name-nondirectory file))
+                      (new-main (expand-file-name main-name dest-dir))
+                      (sidecars (transmute--get-sidecar-files file)))
+                 (unless (file-directory-p dest-dir)
+                   (make-directory dest-dir t))
+                 ;; Update rename record for main file
+                 (let ((abs-orig (expand-file-name file))
+                       (abs-new (expand-file-name new-main)))
+                   (unless (string= abs-orig abs-new)
+                     (transmute--log "[MOVE] %s -> %s" (file-name-nondirectory abs-orig)
+                                     (concat year-month "/" (file-name-nondirectory abs-new)))
+                     (setq transmute--last-renames (cons (cons abs-orig abs-new) transmute--last-renames))
+                     (transmute--rename-file-safe abs-orig abs-new t))
+                   ;; Move sidecars
+                   (dolist (s sidecars)
+                     (let* ((s-abs (expand-file-name s))
+                            (new-s (expand-file-name (file-name-nondirectory s) dest-dir))
+                            (new-s-abs (expand-file-name new-s)))
+                       (unless (string= s-abs new-s-abs)
+                         (transmute--log "[SIDE] %s -> %s" (file-name-nondirectory s-abs)
+                                         (concat year-month "/" (file-name-nondirectory new-s-abs)))
+                         (setq transmute--last-renames (cons (cons s-abs new-s-abs) transmute--last-renames))
+                         (transmute--rename-file-safe s-abs new-s-abs t)))))))
+           (funcall done)))))))
 
 (defun transmute--normalise-string (name)
   "Return NAME with whitespace and shell/glob-unsafe characters replaced.
