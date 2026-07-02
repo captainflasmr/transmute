@@ -314,6 +314,7 @@ This prevents \"changed on disk\" prompts from buffers visiting FILE."
   "Run CMD string asynchronously as NAME.
 Optional CALLBACK is called with (PROCESS EXIT-STATUS) after completion."
   (transmute--log "[START] %s: %s" name cmd)
+  (display-buffer (get-buffer-create transmute-log-buffer-name))
   (let* ((buf (generate-new-buffer (format " *transmute-%s*" name)))
          (process (start-process-shell-command name buf cmd)))
     (push process transmute-active-processes)
