@@ -2026,9 +2026,11 @@ so that C-c I works in the *image-dired-display-image* buffer and image-mode buf
 Call this in your init file after loading both packages.
 Also activates keybindings in the *image-dired-display-image* buffer
 via `special-mode-hook' and `image-dired-image-mode-hook'."
-  (when (boundp 'image-dired-thumbnail-mode-map)
+  (when (and (boundp 'image-dired-thumbnail-mode-map)
+             (keymapp image-dired-thumbnail-mode-map))
     (define-key image-dired-thumbnail-mode-map (kbd "C-c I") #'transmute-menu))
-  (when (boundp 'image-dired-display-image-mode-map)
+  (when (and (boundp 'image-dired-display-image-mode-map)
+             (keymapp image-dired-display-image-mode-map))
     (define-key image-dired-display-image-mode-map (kbd "C-c I") #'transmute-menu)))
 
 (provide 'transmute)
