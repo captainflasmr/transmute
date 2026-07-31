@@ -9,3 +9,8 @@
 This document contains the current bugs/improvements, this is just for me mainly but does include any Issues reported.
 
 * Bugs/Improvements
+** DONE Windows: =trash-put= not found fails image/GAN conversion
+:PROPERTIES:
+:CLOSED: 2026-07-31 Fri
+:END:
+`transmute-convert-image` and `transmute-convert-gan` embedded =transmute-trash-command= (=trash-put=) directly in the shell =&&= chain without checking =executable-find=. On Windows the command is absent, so the chain exited with code 1 and the task was reported FAILED even though the conversion itself succeeded. Fixed in 0.6.1 by guarding the trash step with =executable-find= and falling back to =move-file-to-trash= via the async completion callback.

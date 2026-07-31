@@ -30,7 +30,7 @@ Transmute relies on the following tools being installed in your system path:
 - =tesseract= (OCR/Text extraction)
 - =pdftoppm= (from =poppler-utils=, for PDF image extraction)
 - =realesrgan-ncnn-vulkan= (Optional: for AI upscaling)
-- =trash-put= (Optional: for safe file deletion)
+- =trash-put= (Optional: for safe file deletion; falls back to Emacs' =move-file-to-trash= when unavailable, e.g. on Windows)
 
 * Installation
 

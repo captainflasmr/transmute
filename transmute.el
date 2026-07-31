@@ -3,7 +3,7 @@
 ;; Author: James Dyer <james@dyerdwelling.family>
 ;; Keywords: media, image, video, automation
 ;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (transient "0.3.0"))
-;; Version: 0.6.0
+;; Version: 0.6.1
 
 ;;; Commentary:
 ;; This package provides Emacs Lisp implementations for media processing
@@ -464,10 +464,19 @@ Preserves metadata and moves SRC to trash."
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
          (trash-cmd (unless (string= src dst)
-                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+                      (if (executable-find transmute-trash-command)
+                          (format "%s %s" transmute-trash-command (shell-quote-argument src))
+                        nil)))
+         (trash-fallback (unless (string= src dst)
+                           (unless (executable-find transmute-trash-command)
+                             src)))
          (xattr-cmd (transmute--set-processed-xattr src))
          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
-    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd
+      (when trash-fallback
+        (lambda (_proc exit-code)
+          (when (zerop exit-code)
+            (move-file-to-trash trash-fallback)))))))
 
 (defun transmute-convert-image-copy (src dst &rest magick-args)
   "Convert image SRC to DST using MAGICK-ARGS.
@@ -512,10 +521,19 @@ Preserves metadata and moves SRC to trash."
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
          (trash-cmd (unless (string= src dst)
-                      (format "%s %s" transmute-trash-command (shell-quote-argument src))))
+                      (if (executable-find transmute-trash-command)
+                          (format "%s %s" transmute-trash-command (shell-quote-argument src))
+                        nil)))
+         (trash-fallback (unless (string= src dst)
+                           (unless (executable-find transmute-trash-command)
+                             src)))
          (xattr-cmd (transmute--set-processed-xattr src))
          (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
-    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd
+      (when trash-fallback
+        (lambda (_proc exit-code)
+          (when (zerop exit-code)
+            (move-file-to-trash trash-fallback)))))))
 
 ;;; Batch / Dired Integration
 

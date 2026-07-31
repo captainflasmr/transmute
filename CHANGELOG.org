@@ -11,6 +11,14 @@ project's main git repository.
 
 * Versions
 
+** <<2026-07-31 Fri>> *0.6.1*
+
+Windows trash fallback -- Image/GAN conversion no longer fails when =trash-put= is missing.
+
+*** Bugfixes
+
+- *Cross-platform trash fallback* -- `transmute-convert-image` and `transmute-convert-gan` now guard the configured `transmute-trash-command` with `executable-find` before embedding it in the shell command chain. When the external trash command (e.g. =trash-put=) is unavailable -- as on Windows -- it is omitted from the chain so the conversion completes cleanly, and the original source file is moved to the system trash via Emacs' built-in `move-file-to-trash` (Recycle Bin on Windows) through the async completion callback. Previously the whole batch task was reported as FAILED with exit code 1 because the trailing =trash-put= step was not found, even though the actual conversion had succeeded.
+
 ** <<2026-06-02 Tue>> *0.6.0*
 
 Filename normalisation -- New command to scrub spaces and shell/glob-unsafe characters from filenames.
