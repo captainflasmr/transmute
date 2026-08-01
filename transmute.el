@@ -877,17 +877,15 @@ and would otherwise cause a shell \"command not found\" (exit 127)."
                  names)
         (cl-some (lambda (p) (when (file-executable-p p) p)) paths))))
 
-;;;###autoload
-(defun transmute-document-to-pdf ()
-  "Convert documents to PDF using LibreOffice headless.
-Supports .docx, .doc, .odt, .rtf and .wpd.  Each PDF is written
-alongside its source file.  An isolated LibreOffice profile is used per
-file so a running GUI instance won't interfere.  Runs asynchronously,
-one file at a time, so Emacs stays responsive.
-The binary is chosen via `transmute-soffice-command' (auto-detected
-when nil).  If no LibreOffice binary is found, the batch is aborted
-with a user error."
-  (interactive)
+(defun transmute--document-convert (format)
+  "Convert selected documents to FORMAT using LibreOffice headless.
+FORMAT is the soffice --convert-to filter, e.g. \"pdf\" or
+\"txt:Text (encoded):UTF8\".  Each output is written alongside its
+source file.  An isolated LibreOffice profile is used per file so a
+running GUI instance won't interfere.  Runs asynchronously, one file at
+a time, so Emacs stays responsive.  The binary is chosen via
+`transmute-soffice-command' (auto-detected when nil).  If no LibreOffice
+binary is found, the batch is aborted with a user error."
   (let ((soffice (transmute--soffice-binary)))
     (unless soffice
       (transmute--log "[FAILED] No LibreOffice binary found (soffice/libreoffice/lowriter).")
@@ -897,9 +895,10 @@ with a user error."
         (let* ((dir (file-name-directory (expand-file-name file)))
                (profile (make-temp-file "lo-profile-" t))
                (env-arg (format "-env:UserInstallation=file://%s" profile))
-               (cmd (format "%s --headless %s --convert-to pdf --outdir %s %s"
+               (cmd (format "%s --headless %s --convert-to %s --outdir %s %s"
                             (shell-quote-argument soffice)
                             (shell-quote-argument env-arg)
+                            (shell-quote-argument format)
                             (shell-quote-argument dir)
                             (shell-quote-argument (expand-file-name file)))))
           (transmute--run-async cmd
@@ -907,6 +906,48 @@ with a user error."
               (when (file-directory-p profile)
                 (delete-directory profile t))
               (funcall done))))))))
+
+;;;###autoload
+(defun transmute-document-to-pdf ()
+  "Convert documents to PDF using LibreOffice headless."
+  (interactive)
+  (transmute--document-convert "pdf"))
+
+;;;###autoload
+(defun transmute-document-to-docx ()
+  "Convert documents to DOCX using LibreOffice headless."
+  (interactive)
+  (transmute--document-convert "docx"))
+
+;;;###autoload
+(defun transmute-document-to-odt ()
+  "Convert documents to ODT using LibreOffice headless."
+  (interactive)
+  (transmute--document-convert "odt"))
+
+;;;###autoload
+(defun transmute-document-to-txt ()
+  "Convert documents to UTF-8 TXT using LibreOffice headless."
+  (interactive)
+  (transmute--document-convert "txt:Text (encoded):UTF8"))
+
+;;;###autoload
+(defun transmute-document-to-rtf ()
+  "Convert documents to RTF using LibreOffice headless."
+  (interactive)
+  (transmute--document-convert "rtf"))
+
+;;;###autoload
+(defun transmute-document-to-html ()
+  "Convert documents to HTML using LibreOffice headless."
+  (interactive)
+  (transmute--document-convert "html"))
+
+;;;###autoload
+(defun transmute-document-to-epub ()
+  "Convert documents to EPUB using LibreOffice headless."
+  (interactive)
+  (transmute--document-convert "epub"))
 
 ;;;###autoload
 (defun transmute-picture-montage (output-file)
@@ -1848,7 +1889,13 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                      ("Audio Normalise" . transmute-audio-normalise)
                      ("Audio Trim Silence" . transmute-audio-trim-silence)
                      ("Audio Info" . transmute-audio-info)
-                     ("Document To PDF" . transmute-document-to-pdf)))
+                     ("Document To PDF" . transmute-document-to-pdf)
+                     ("Document To DOCX" . transmute-document-to-docx)
+                     ("Document To ODT" . transmute-document-to-odt)
+                     ("Document To TXT" . transmute-document-to-txt)
+                     ("Document To RTF" . transmute-document-to-rtf)
+                     ("Document To HTML" . transmute-document-to-html)
+                     ("Document To EPUB" . transmute-document-to-epub)))
          (choice (completing-read "Media Command: " (mapcar #'car commands) nil t))
          (func (cdr (assoc choice commands))))
     (when func
@@ -1942,7 +1989,15 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
 
 (transient-define-prefix transmute-document-menu ()
   ["Document"
-   ("p" "To PDF" transmute-document-to-pdf)])
+   ["Convert"
+    ("p" "To PDF" transmute-document-to-pdf)
+    ("w" "To DOCX" transmute-document-to-docx)
+    ("o" "To ODT" transmute-document-to-odt)
+    ("t" "To TXT" transmute-document-to-txt)
+    ("r" "To RTF" transmute-document-to-rtf)]
+   ["Publish"
+    ("h" "To HTML" transmute-document-to-html)
+    ("e" "To EPUB" transmute-document-to-epub)]])
 
 ;;;###autoload
 (transient-define-prefix transmute-menu ()
