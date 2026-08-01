@@ -3,7 +3,7 @@
 ;; Author: James Dyer <james@dyerdwelling.family>
 ;; Keywords: media, image, video, automation
 ;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (transient "0.3.0"))
-;; Version: 0.6.1
+;; Version: 0.7.0
 
 ;;; Commentary:
 ;; This package provides Emacs Lisp implementations for media processing
@@ -193,6 +193,10 @@ COMMANDS can be a list of strings or (label . cmd) pairs."
 (defvar transmute-audio-extensions
   '("mp3" "wav" "flac" "ogg" "m4a" "aac" "wma")
   "List of audio file extensions.")
+
+(defvar transmute-document-extensions
+  '("docx" "doc" "odt" "rtf" "wpd")
+  "List of document file extensions convertible to PDF.")
 
 ;;; Core Variables & Parsing
 
@@ -573,12 +577,13 @@ Otherwise ask for file."
    (t (list (read-file-name "Process file: ")))))
 
 (defun transmute-get-filtered-targets (type)
-  "Get marked files filtered by TYPE ('image, 'video, 'audio, or 'any)."
+  "Get marked files filtered by TYPE ('image, 'video, 'audio, 'document, or 'any)."
   (let* ((files (transmute-get-targets))
          (extensions (cl-case type
                        (image transmute-image-extensions)
                        (video transmute-video-extensions)
                        (audio transmute-audio-extensions)
+                       (document transmute-document-extensions)
                        (any (append transmute-image-extensions 
                                     transmute-video-extensions 
                                     transmute-audio-extensions))
@@ -844,6 +849,64 @@ Runs asynchronously so Emacs stays responsive during OCR."
                                       (format "magick %s %s"
                                               (mapconcat #'shell-quote-argument targets " ")
                                               (shell-quote-argument dst)))))))
+
+(defcustom transmute-soffice-command "soffice"
+  "LibreOffice headless binary used by `transmute-document-to-pdf'.
+Common alternatives are libreoffice or lowriter.  When nil, Transmute
+auto-detects the first available of soffice, libreoffice, or lowriter
+at run time via `executable-find'."
+  :type '(choice (string :tag "Command") (const :tag "Auto-detect" nil))
+  :group 'transmute)
+
+(defun transmute--soffice-binary ()
+  "Return the LibreOffice headless binary to use, or nil if none found.
+Honors `transmute-soffice-command'; when nil, auto-detects.  The result
+is always an absolute file name so the spawned shell does not need to
+resolve the binary via its own PATH, which may differ from `exec-path'
+and would otherwise cause a shell \"command not found\" (exit 127)."
+  (let ((names (if transmute-soffice-command
+                   (list transmute-soffice-command)
+                 '("soffice" "libreoffice" "lowriter")))
+        (paths '("/usr/bin/soffice" "/usr/bin/libreoffice" "/usr/bin/lowriter"
+                 "/usr/lib/libreoffice/program/soffice"
+                 "/opt/libreoffice/program/soffice")))
+    (or (cl-some (lambda (name)
+                   (cond ((string-match-p "\\`/" name)
+                          (when (file-executable-p name) name))
+                         ((executable-find name))))
+                 names)
+        (cl-some (lambda (p) (when (file-executable-p p) p)) paths))))
+
+;;;###autoload
+(defun transmute-document-to-pdf ()
+  "Convert documents to PDF using LibreOffice headless.
+Supports .docx, .doc, .odt, .rtf and .wpd.  Each PDF is written
+alongside its source file.  An isolated LibreOffice profile is used per
+file so a running GUI instance won't interfere.  Runs asynchronously,
+one file at a time, so Emacs stays responsive.
+The binary is chosen via `transmute-soffice-command' (auto-detected
+when nil).  If no LibreOffice binary is found, the batch is aborted
+with a user error."
+  (interactive)
+  (let ((soffice (transmute--soffice-binary)))
+    (unless soffice
+      (transmute--log "[FAILED] No LibreOffice binary found (soffice/libreoffice/lowriter).")
+      (user-error "No LibreOffice binary found.  Install libreoffice or set `transmute-soffice-command'"))
+    (when-let ((targets (transmute-get-filtered-targets 'document)))
+      (transmute-do-batch-async targets
+        (let* ((dir (file-name-directory (expand-file-name file)))
+               (profile (make-temp-file "lo-profile-" t))
+               (env-arg (format "-env:UserInstallation=file://%s" profile))
+               (cmd (format "%s --headless %s --convert-to pdf --outdir %s %s"
+                            (shell-quote-argument soffice)
+                            (shell-quote-argument env-arg)
+                            (shell-quote-argument dir)
+                            (shell-quote-argument (expand-file-name file)))))
+          (transmute--run-async cmd
+            (lambda (_code)
+              (when (file-directory-p profile)
+                (delete-directory profile t))
+              (funcall done))))))))
 
 ;;;###autoload
 (defun transmute-picture-montage (output-file)
@@ -1784,7 +1847,8 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                      ("Audio Convert" . transmute-audio-convert)
                      ("Audio Normalise" . transmute-audio-normalise)
                      ("Audio Trim Silence" . transmute-audio-trim-silence)
-                     ("Audio Info" . transmute-audio-info)))
+                     ("Audio Info" . transmute-audio-info)
+                     ("Document To PDF" . transmute-document-to-pdf)))
          (choice (completing-read "Media Command: " (mapcar #'car commands) nil t))
          (func (cdr (assoc choice commands))))
     (when func
@@ -1876,6 +1940,10 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
     ("c" "Clear Tags" transmute-clear-tags)
     ("i" "Tag Info" transmute-tag-info)]])
 
+(transient-define-prefix transmute-document-menu ()
+  ["Document"
+   ("p" "To PDF" transmute-document-to-pdf)])
+
 ;;;###autoload
 (transient-define-prefix transmute-menu ()
   "Main menu for media management utilities."
@@ -1883,7 +1951,8 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
     ("i" "Image Commands" transmute-image-menu)
     ("v" "Video Commands" transmute-video-menu)
     ("a" "Audio Commands" transmute-audio-menu)
-    ("t" "Tag Commands" transmute-tag-menu)]
+    ("t" "Tag Commands" transmute-tag-menu)
+    ("d" "Document" transmute-document-menu)]
    ["Utilities"
     ("n" "Normalise Names" transmute-normalise-names)
     ("m" "Completing Read Menu" transmute-completing-read-menu)

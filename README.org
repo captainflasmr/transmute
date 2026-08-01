@@ -12,6 +12,7 @@ Designed for Dired users, Transmute allows you to batch process images, videos, 
 - *Images:* Convert, resize (crush/scale), upscale (GAN), rotate, brighten, auto-colour, crop, OCR (text extraction), convert to PDF, extract from PDF, montage creation, date-based organisation, WhatsApp filename fix, orientation reset, horizontal split, and Org capture gallery export.
 - *Video:* Convert (H.264/AAC), shrink, rescale, rotate (R/L/CCW), reverse, speed up/slow down, trim (top/tail), cut, extract audio, remove/replace audio, background music injection (random library with fade-out), concatenate, double length, extract frames, from frames sequence, GIF conversion, and glitch/flip removal.
 - *Audio:* Convert to MP3, normalise volume, and trim silence.
+- *Documents:* Convert to PDF (LibreOffice headless; .docx, .doc, .odt, .rtf, .wpd).
 - *Metadata:* Interactive hierarchical tagging, renaming based on creation date/tags, EXIF management, and sidecar file (.xmp) synchronization.
 - *Dired & Image-Dired Integration* -- Process marked files or the file at point in Dired buffers, and operate on the displayed image from the =*image-dired-display-image*= buffer. =C-c M= works in both thumbnail and display views.
 - *Intelligent Filtering:* Commands automatically filter your selection to relevant files (e.g., Image commands only target images), allowing you to safely trigger batch operations on mixed-media folders.
@@ -30,6 +31,7 @@ Transmute relies on the following tools being installed in your system path:
 - =tesseract= (OCR/Text extraction)
 - =pdftoppm= (from =poppler-utils=, for PDF image extraction)
 - =realesrgan-ncnn-vulkan= (Optional: for AI upscaling)
+- =soffice= (from =libreoffice= / =libreoffice-fresh=, for document to PDF conversion)
 - =trash-put= (Optional: for safe file deletion; falls back to Emacs' =move-file-to-trash= when unavailable, e.g. on Windows)
 
 * Installation
@@ -63,7 +65,7 @@ If no files are marked, Transmute will operate on the file at point.
 The =transmute-menu= is a nested transient with a compact 2-row dispatch:
 
 #+begin_example
-Transmute:   i  v  a  t
+Transmute:   i  v  a  t  d
 Utilities:   m  L  S
 #+end_example
 
@@ -108,6 +110,12 @@ Utilities:   m  L  S
      k Tag from List      c Clear Tags
      r Add Tags & Rename  i Tag Info
      R Rename from Tags
+#+end_example
+
+=Document= (=d=) -- 1 column, 1 row:
+
+#+begin_example
+ Document: p To PDF
 #+end_example
 
 Press =q= or =C-g= at any sub-transient to return to the main menu.

@@ -11,6 +11,17 @@ project's main git repository.
 
 * Versions
 
+** <<2026-07-31 Fri>> *0.7.0*
+
+Document to PDF -- New command to convert office documents to PDF via LibreOffice headless.
+
+*** Features
+
+- *Document to PDF* -- Added `transmute-document-to-pdf`, which converts selected documents (.docx, .doc, .odt, .rtf, .wpd) to PDF using `soffice --headless --convert-to pdf`. Each PDF is written alongside its source. An isolated LibreOffice user profile is created per file (via `-env:UserInstallation=file://...`) so a running GUI instance does not interfere, and the profile is cleaned up afterwards. Conversion runs asynchronously, one file at a time, through `transmute-do-batch-async`.
+- *Document File Type* -- New `transmute-document-extensions` list and a `'document` filter case in `transmute-get-filtered-targets`. Documents are deliberately excluded from the `'any` aggregate so existing tag/organise commands are unaffected.
+- *Menu Integration* -- New `transmute-document-menu` transient (=d= from the main menu, =p= for To PDF), plus a `Document To PDF` entry in the completing-read menu.
+- *Configurable Binary* -- The LibreOffice binary is chosen via the new `transmute-soffice-command` option (default =soffice=); when nil, Transmute auto-detects the first available of =soffice=, =libreoffice=, or =lowriter=. If none is found, the batch aborts with a clear user error instead of failing silently with a shell exit 127.
+
 ** <<2026-07-31 Fri>> *0.6.1*
 
 Windows trash fallback -- Image/GAN conversion no longer fails when =trash-put= is missing.
