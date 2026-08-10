@@ -182,6 +182,14 @@ COMMANDS can be a list of strings or (label . cmd) pairs."
   :type 'boolean
   :group 'transmute)
 
+(defcustom transmute-compress-quality "85%"
+  "JPEG quality level used by `transmute-picture-compress'.
+Expressed as a percentage string (e.g. \"85%\" or \"50%\").  Lower
+values produce smaller files at the cost of visible artefacts.
+85%% is typically visually indistinguishable from the source."
+  :type 'string
+  :group 'transmute)
+
 (defvar transmute-image-extensions
   '("jpg" "jpeg" "png" "gif" "bmp" "tiff" "webp" "svg" "heic" "heif")
   "List of image file extensions.")
@@ -690,6 +698,38 @@ The after-batch hook runs when all processes finish."
   (when-let ((targets (transmute-get-filtered-targets 'image)))
     (transmute-do-batch targets
       (transmute-convert-image file file "-auto-orient" "-strip" "-quality" "50%" "-resize" "1920x>" "-resize" "x1920>"))))
+
+;;;###autoload
+(defun transmute-picture-compress ()
+  "Compress images in place, keeping resolution.
+Strips metadata and re-encodes at `transmute-compress-quality'.
+No resizing is performed — pixel dimensions are preserved.
+Processes files sequentially so Emacs stays responsive on large batches."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch-async targets
+      (let* ((src (expand-file-name file))
+             (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension src))))
+             (magick-cmd (mapconcat #'shell-quote-argument
+                                    (append (list "magick" src)
+                                            (list "-auto-orient" "-strip"
+                                                  "-quality" transmute-compress-quality)
+                                            (list tmp)) " "))
+             (exif-cmd (transmute--exif-cmd src tmp))
+             (touch-cmd (format "touch -r %s %s"
+                                (shell-quote-argument src)
+                                (shell-quote-argument tmp)))
+             (cp-cmd (format "cp -p %s %s"
+                             (shell-quote-argument tmp)
+                             (shell-quote-argument src)))
+             (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+             (xattr-cmd (transmute--set-processed-xattr src))
+             (full-cmd (mapconcat #'identity
+                                  (delq nil (list magick-cmd exif-cmd touch-cmd
+                                                  cp-cmd rm-tmp xattr-cmd))
+                                  " && ")))
+        (transmute--run-async full-cmd
+          (lambda (_code) (funcall done)))))))
 
 ;;;###autoload
 (defun transmute-picture-rotate-right ()
@@ -1840,6 +1880,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
   (let* ((commands '(("Picture Convert" . transmute-picture-convert)
                      ("Picture Crush (640px)" . transmute-picture-crush)
                      ("Picture Scale (1920px)" . transmute-picture-scale)
+                     ("Picture Compress (lossless)" . transmute-picture-compress)
                      ("Picture Correct (Brighten)" . transmute-picture-correct)
                      ("Picture Auto Colour" . transmute-picture-autocolour)
                      ("Picture Crop" . transmute-picture-crop)
@@ -1917,10 +1958,11 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
     ("i" "Info" transmute-picture-info)
     ("x" "Show Backup Xattr" transmute-picture-show-xattr)
     ("X" "Set Xattr" transmute-picture-set-xattr)]
-   ["Enhance"
-    ("z" "Crush (640px)" transmute-picture-crush)
-    ("s" "Scale (1920px)" transmute-picture-scale)
-    ("u" "Upscale (GAN)" transmute-picture-upscale)
+    ["Enhance"
+     ("z" "Crush (640px)" transmute-picture-crush)
+     ("s" "Scale (1920px)" transmute-picture-scale)
+     ("Z" "Compress (lossless)" transmute-picture-compress)
+     ("u" "Upscale (GAN)" transmute-picture-upscale)
     ("r" "Rotate Right" transmute-picture-rotate-right)
     ("l" "Rotate Left" transmute-picture-rotate-left)]
    ["Colour"
