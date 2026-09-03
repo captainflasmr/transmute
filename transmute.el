@@ -748,6 +748,15 @@ Processes files sequentially so Emacs stays responsive on large batches."
       (transmute--rotate-image file "-90"))))
 
 ;;;###autoload
+(defun transmute-picture-rotate (degrees)
+  "Rotate images by user-supplied DEGREES (pixel-only, no EXIF orientation).
+Positive values rotate clockwise, negative counter-clockwise."
+  (interactive (list (read-number "Degrees (+ clockwise, - counter-clockwise): " 90)))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (transmute--rotate-image file (number-to-string degrees)))))
+
+;;;###autoload
 (defun transmute-picture-correct ()
   "Brighten images (120% modulate)."
   (interactive)
@@ -1884,6 +1893,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                      ("Picture Correct (Brighten)" . transmute-picture-correct)
                      ("Picture Auto Colour" . transmute-picture-autocolour)
                      ("Picture Crop" . transmute-picture-crop)
+                     ("Picture Rotate by Degrees" . transmute-picture-rotate)
                      ("Picture Upscale (GAN)" . transmute-picture-upscale)
                      ("Picture Get Text (OCR)" . transmute-picture-get-text)
                      ("Picture To PDF" . transmute-picture-to-pdf)
@@ -1964,7 +1974,8 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
      ("Z" "Compress (lossless)" transmute-picture-compress)
      ("u" "Upscale (GAN)" transmute-picture-upscale)
     ("r" "Rotate Right" transmute-picture-rotate-right)
-    ("l" "Rotate Left" transmute-picture-rotate-left)]
+    ("l" "Rotate Left" transmute-picture-rotate-left)
+    ("R" "Rotate by Degrees..." transmute-picture-rotate)]
    ["Colour"
     ("b" "Brighten" transmute-picture-correct)
     ("a" "Auto Colour" transmute-picture-autocolour)
