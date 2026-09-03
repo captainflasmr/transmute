@@ -3,7 +3,7 @@
 ;; Author: James Dyer <james@dyerdwelling.family>
 ;; Keywords: media, image, video, automation
 ;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (transient "0.3.0"))
-;; Version: 0.7.0
+;; Version: 0.7.1
 
 ;;; Commentary:
 ;; This package provides Emacs Lisp implementations for media processing
@@ -2206,12 +2206,16 @@ so that C-c I works in the *image-dired-display-image* buffer and image-mode buf
 
 ;;;###autoload
 (defun transmute-setup-thumbnail-keys ()
-  "Bind `transmute-menu' to C-c M in image-dired thumbnail and display buffers.
+  "Bind `transmute-menu' in image-dired thumbnail and display buffers.
+In the thumbnail buffer both `I' and `C-c I' run `transmute-menu'.
+In the display-image buffer only `C-c I' is bound, since a bare `I'
+could clash with image-mode bindings there.
 Call this in your init file after loading both packages.
 Also activates keybindings in the *image-dired-display-image* buffer
 via `special-mode-hook' and `image-dired-image-mode-hook'."
   (when (and (boundp 'image-dired-thumbnail-mode-map)
              (keymapp image-dired-thumbnail-mode-map))
+    (define-key image-dired-thumbnail-mode-map (kbd "I") #'transmute-menu)
     (define-key image-dired-thumbnail-mode-map (kbd "C-c I") #'transmute-menu))
   (when (and (boundp 'image-dired-display-image-mode-map)
              (keymapp image-dired-display-image-mode-map))

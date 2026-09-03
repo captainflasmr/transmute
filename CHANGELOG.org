@@ -11,6 +11,14 @@ project's main git repository.
 
 * Versions
 
+** <<2026-09-01 Tue>> *0.7.1*
+
+Thumbnail keybinding -- `I` now opens the transmute menu straight from image-dired's thumbnail buffer.
+
+*** Features
+
+- *Thumbnail Keybinding* -- `I` is now bound to `transmute-menu` in the `image-dired-thumbnail-mode-map` via `transmute-setup-thumbnail-keys`, alongside the existing `C-c I`. A bare `I` is deliberately not bound in the display-image buffer, where it could clash with `image-mode` bindings.
+
 ** <<2026-07-31 Fri>> *0.7.0*
 
 Document to PDF -- New command to convert office documents to PDF via LibreOffice headless.
