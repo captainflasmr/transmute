@@ -1203,6 +1203,40 @@ is placed at ~/DCIM/content/static/<section>.jpg."
                (function transmute--gallery-capture-template)
                :prepend t :jump-to-captured t :after-finalize transmute-gallery-after-finalize))
 
+(defun transmute--normalise-string (name)
+  "Return NAME with whitespace and shell/glob-unsafe characters replaced.
+Diacritics are stripped (e.g. \"é\" becomes \"e\"), runs of whitespace
+become a single dash, and any character outside the safe set
+[A-Za-z0-9._@-] becomes a dash.  Existing \"--\" and \"__\" separators
+are preserved.  Leading and trailing dashes are trimmed.  When
+`transmute-normalise-downcase' is non-nil the result is lowercased."
+  (let* ((decomposed (ucs-normalize-NFD-string name))
+         ;; Drop combining diacritical marks left by NFD decomposition.
+         (stripped (replace-regexp-in-string "[̀-ͯ]" "" decomposed))
+         ;; Collapse any run of whitespace to a single dash.
+         (despaced (replace-regexp-in-string "[[:space:]]+" "-" stripped))
+         ;; Replace every remaining unsafe character with a dash.
+         (safe (replace-regexp-in-string "[^A-Za-z0-9._@-]" "-" despaced))
+         ;; Trim leading and trailing dashes.
+         (trimmed (replace-regexp-in-string "\\(?:\\`-+\\|-+\\'\\)" "" safe)))
+    (if transmute-normalise-downcase (downcase trimmed) trimmed)))
+
+(defun transmute--tags-to-filename (tags)
+  "Convert raw TAGS string to a filename-safe `__tags' segment.
+TAGS uses the on-disk convention where hierarchical separators are
+\"@\" and multi-tag separators are \"-\" (commas from exiftool output
+are first converted, folding any surrounding whitespace so \", \"
+becomes a single \"-\").  Runs the result through
+`transmute--normalise-string' so spaces (e.g. from entries in
+`transmute-tag-list-file' like \"oaktrees animals animals@cow\")
+become dashes and shell/glob-unsafe characters are removed.
+EXIF metadata is left untouched; only the filename segment is
+sanitised."
+  (transmute--normalise-string
+   (replace-regexp-in-string
+    "/" "@"
+    (replace-regexp-in-string "[[:space:]]*,[[:space:]]*" "-" tags))))
+
 (defun transmute--known-tags ()
   "Return a list of known tags from `transmute-tag-list-file'."
   (when (and transmute-tag-list-file
@@ -1369,7 +1403,7 @@ Runs asynchronously so Emacs stays responsive during batch processing."
              (tags-out (shell-command-to-string (format "exiftool -s3 -TagsList %s" (shell-quote-argument file))))
              (tags (string-trim tags-out)))
         (when (and date-info (not (string-empty-p tags)))
-          (let* ((formatted-tags (replace-regexp-in-string "/" "@" (replace-regexp-in-string "," "-" tags)))
+          (let* ((formatted-tags (transmute--tags-to-filename tags))
                  (formatted-date (transmute-format-date val))
                  (parsed (transmute--parse-filename file))
                  (label (cdr (assoc 'label parsed)))
@@ -1394,7 +1428,10 @@ Runs asynchronously so Emacs stays responsive during batch processing."
   "Tag selected media files from known tags, then rename based on tags and date.
 TAGS is selected via `completing-read-multiple' against the tag list file.
 After writing metadata, each file is renamed to the
-YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
+YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern.
+The filename tag segment is sanitised via `transmute--tags-to-filename'
+so spaces become dashes and no spaces appear on disk; EXIF tags keep
+their original form."
   (interactive (list (completing-read-multiple "Tags: " (transmute--known-tags))))
   (when-let ((targets (transmute-get-filtered-targets 'any)))
     (let* ((tag-list (if (stringp tags) (split-string tags "," t) tags))
@@ -1402,7 +1439,7 @@ YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern."
            (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
            (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
            (keyword-str (mapconcat #'identity keywords ","))
-           (formatted-tags (replace-regexp-in-string "/" "@" (replace-regexp-in-string "," "-" hier-tag-str))))
+           (formatted-tags (transmute--tags-to-filename hier-tag-str)))
       (transmute-do-batch-parallel targets
         (transmute--log "[TAG] %s <- %s" file tag-str)
         (let ((cmd (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s %s"
@@ -1542,24 +1579,6 @@ once the whole batch has finished."
                          (setq transmute--last-renames (cons (cons s-abs new-s-abs) transmute--last-renames))
                          (transmute--rename-file-safe s-abs new-s-abs t)))))))
            (funcall done)))))))
-
-(defun transmute--normalise-string (name)
-  "Return NAME with whitespace and shell/glob-unsafe characters replaced.
-Diacritics are stripped (e.g. \"é\" becomes \"e\"), runs of whitespace
-become a single dash, and any character outside the safe set
-[A-Za-z0-9._@-] becomes a dash.  Existing \"--\" and \"__\" separators
-are preserved.  Leading and trailing dashes are trimmed.  When
-`transmute-normalise-downcase' is non-nil the result is lowercased."
-  (let* ((decomposed (ucs-normalize-NFD-string name))
-         ;; Drop combining diacritical marks left by NFD decomposition.
-         (stripped (replace-regexp-in-string "[̀-ͯ]" "" decomposed))
-         ;; Collapse any run of whitespace to a single dash.
-         (despaced (replace-regexp-in-string "[[:space:]]+" "-" stripped))
-         ;; Replace every remaining unsafe character with a dash.
-         (safe (replace-regexp-in-string "[^A-Za-z0-9._@-]" "-" despaced))
-         ;; Trim leading and trailing dashes.
-         (trimmed (replace-regexp-in-string "\\(?:\\`-+\\|-+\\'\\)" "" safe)))
-    (if transmute-normalise-downcase (downcase trimmed) trimmed)))
 
 ;;;###autoload
 (defun transmute-normalise-names ()
