@@ -45,6 +45,12 @@
 (defvar transmute--last-renames nil
   "Alist mapping old filenames to new filenames from the last batch.")
 
+(defvar transmute--task-registered nil
+  "Dynamically bound around a batch body by `transmute-do-batch'.
+`transmute--run-command-async' sets it when the body started an
+asynchronous process, so the batch macro knows the sentinel, not the
+macro itself, is responsible for counting the task as completed.")
+
 (defvar transmute--inhibit-display-refresh-once nil
   "Internal flag to skip image display refresh once.")
 
@@ -58,7 +64,7 @@ Useful for refreshing external buffers like image-dired thumbnail views.")
 (defvar transmute-completed-tasks 0
   "Number of completed tasks in the current batch.")
 
-(defcustom transmute-tag-list-file "/home/jdyer/bin/category-list-uniq.txt"
+(defcustom transmute-tag-list-file "~/bin/category-list-uniq.txt"
   "Path to a file of known tags, one per line, for `transmute-tag-from-list'.
 When nil, fallback completion is used."
   :type '(choice (file :tag "Tag list file") (const :tag "None" nil))
@@ -79,23 +85,82 @@ When nil, fallback completion is used."
 
 (defun transmute--display-info (targets &rest commands)
   "Run COMMANDS for each of TARGETS and display in a dedicated buffer.
-COMMANDS can be a list of strings or (label . cmd) pairs."
-  (let ((buf (get-buffer-create transmute-info-buffer-name)))
+COMMANDS can be a list of strings or (label . cmd) pairs.  The
+commands run one at a time in the background and their output is
+appended in order, so Emacs stays responsive on large selections."
+  (let ((buf (get-buffer-create transmute-info-buffer-name))
+        (queue nil)
+        (next nil))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (transmute-info-mode)
-        (dolist (file targets)
-          (insert (propertize (format "File: %s\n" file) 'face 'bold))
-          (dolist (cmd-spec commands)
-            (let ((label (if (listp cmd-spec) (car cmd-spec) nil))
-                  (cmd (if (listp cmd-spec) (cdr cmd-spec) cmd-spec)))
-              (when label
-                (insert (propertize (format "[%s]\n" label) 'face 'font-lock-comment-face)))
-              (insert (shell-command-to-string (format "%s %s 2>&1" cmd (shell-quote-argument file))))))
-          (insert "\n" (make-string (window-width) ?=) "\n\n"))
-        (goto-char (point-min))))
-    (pop-to-buffer buf)))
+        (transmute-info-mode)))
+    ;; Flatten (file, command) pairs into a queue, remembering which
+    ;; command is the first and last for its file so the file header and
+    ;; separator are printed in the right place.
+    (dolist (file targets)
+      (let* ((specs (mapcar (lambda (cmd-spec)
+                              (cons (if (listp cmd-spec) (car cmd-spec) nil)
+                                    (if (listp cmd-spec) (cdr cmd-spec) cmd-spec)))
+                            commands))
+             (n (length specs)))
+        (dotimes (i n)
+          (let ((spec (nth i specs)))
+            (setq queue (cons (list file (car spec) (cdr spec)
+                                    (= i 0) (= i (1- n)))
+                              queue))))))
+    (setq queue (nreverse queue))
+    (setq next
+          (lambda ()
+            (if (null queue)
+                (with-current-buffer buf
+                  (let ((inhibit-read-only t))
+                    (goto-char (point-min))))
+              (let* ((item (pop queue))
+                     (file (nth 0 item))
+                     (label (nth 1 item))
+                     (cmd (nth 2 item))
+                     (first (nth 3 item))
+                     (last (nth 4 item))
+                     (proc-buf (generate-new-buffer " *transmute-info-cmd*")))
+                (with-current-buffer buf
+                  (let ((inhibit-read-only t))
+                    (save-excursion
+                      (goto-char (point-max))
+                      (when first
+                        (insert (propertize (format "File: %s\n" file)
+                                            'face 'bold)))
+                      (when label
+                        (insert (propertize (format "[%s]\n" label)
+                                            'face 'font-lock-comment-face))))))
+                (let ((proc (start-process-shell-command
+                             "transmute-info" proc-buf
+                             (format "%s %s 2>&1" cmd
+                                     (shell-quote-argument file)))))
+                  (set-process-query-on-exit-flag proc nil)
+                  (set-process-sentinel
+                   proc
+                   (lambda (p _event)
+                     (when (memq (process-status p) '(exit signal))
+                       (let ((out (with-current-buffer proc-buf
+                                    (buffer-string))))
+                         (kill-buffer proc-buf)
+                         (with-current-buffer buf
+                           (let ((inhibit-read-only t))
+                             (save-excursion
+                               (goto-char (point-max))
+                               (insert out)
+                               (when last
+                                 (insert "\n"
+                                         (make-string
+                                          (window-width
+                                           (or (get-buffer-window buf)
+                                               (selected-window)))
+                                          ?=)
+                                         "\n\n"))))))
+                       (run-at-time 0 nil next)))))))))
+    (pop-to-buffer buf)
+    (funcall next)))
 
 (defun transmute-show-log ()
   "Show the transmute log buffer."
@@ -182,6 +247,13 @@ COMMANDS can be a list of strings or (label . cmd) pairs."
   :type 'boolean
   :group 'transmute)
 
+(defcustom transmute-ffmpeg-threads nil
+  "Number of threads to pass to ffmpeg, or nil to let ffmpeg decide.
+Set an integer to cap ffmpeg's thread count; a low value helps keep
+the machine responsive when several conversions run in parallel."
+  :type '(choice (integer :tag "Threads") (const :tag "Automatic" nil))
+  :group 'transmute)
+
 (defcustom transmute-compress-quality "85%"
   "JPEG quality level used by `transmute-picture-compress'.
 Expressed as a percentage string (e.g. \"85%\" or \"50%\").  Lower
@@ -208,6 +280,11 @@ values produce smaller files at the cost of visible artefacts.
 
 ;;; Core Variables & Parsing
 
+(defun transmute--join-name (base extension)
+  "Return BASE with EXTENSION appended, or BASE when EXTENSION is nil."
+  (if (and extension (not (string-empty-p extension)))
+      (format "%s.%s" base extension)
+    base))
 
 (defun transmute--parse-filename (file)
   "Parse media filename YYYYMMDDHHMMSS--description__tag1@tag2.ext.
@@ -218,19 +295,30 @@ no-tag, timestamp, label, tags-raw, tags, keywords."
          (filename (file-name-nondirectory file))
          (extension (file-name-extension filename))
          (no-ext (file-name-sans-extension filename))
-         ;; Split by __ to get description and tags
+         ;; Split by __ to get description and tags.  Everything after
+         ;; the first __ counts as tags so extra separators are not lost.
          (parts (split-string no-ext "__"))
          (desc-part (car parts))
-         (tags-raw (cadr parts))
+         (tags-raw (when (cdr parts)
+                     (mapconcat #'identity (cdr parts) "__")))
          ;; Split description by -- to get timestamp and label
          (desc-subparts (split-string desc-part "--"))
-         (has-timestamp (and (> (length desc-subparts) 1)
-                             (string-match-p "^[0-9]\\{14\\}$" (car desc-subparts))))
+         ;; A bare 14-digit name is a timestamp with no label; otherwise
+         ;; the timestamp must be followed by "--".
+         (has-timestamp (string-match-p "\\`[0-9]\\{14\\}\\'"
+                                        (car desc-subparts)))
          (timestamp (if has-timestamp (car desc-subparts) ""))
-         (label (if has-timestamp (cadr desc-subparts) (car desc-subparts)))
-         (no-tag (if has-timestamp 
-                     (format "%s--%s.%s" timestamp label extension)
-                   (format "%s.%s" label extension)))
+         ;; Without a timestamp the whole description is the label, so
+         ;; text after a non-date "--" is not silently dropped.
+         (label (if has-timestamp
+                    (mapconcat #'identity (cdr desc-subparts) "--")
+                  desc-part))
+         (no-tag (transmute--join-name
+                  (cond ((and has-timestamp (not (string-empty-p label)))
+                         (format "%s--%s" timestamp label))
+                        (has-timestamp timestamp)
+                        (t label))
+                  extension))
          ;; Parse tags
          (tags (when tags-raw
                  (replace-regexp-in-string "[-_]" " " (replace-regexp-in-string "@" " " tags-raw))))
@@ -330,11 +418,30 @@ treated as a collision with itself."
        (not (string= (expand-file-name candidate)
                      (expand-file-name original)))))
 
+(defun transmute--unique-name (dir filename)
+  "Return an unused absolute path in DIR based on FILENAME.
+A numeric suffix is added before the extension on collision."
+  (let* ((base (file-name-sans-extension filename))
+         (ext (file-name-extension filename))
+         (candidate (expand-file-name filename dir))
+         (counter 1))
+    (while (file-exists-p candidate)
+      (setq candidate
+            (expand-file-name (if ext
+                                  (format "%s-%d.%s" base counter ext)
+                                (format "%s-%d" base counter))
+                              dir))
+      (cl-incf counter))
+    candidate))
+
 (defun transmute--run-command-async (name cmd &optional callback)
   "Run CMD string asynchronously as NAME.
 Optional CALLBACK is called with (PROCESS EXIT-STATUS) after completion."
   (transmute--log "[START] %s: %s" name cmd)
-  (display-buffer (get-buffer-create transmute-log-buffer-name))
+  (let ((log-buf (get-buffer-create transmute-log-buffer-name)))
+    (unless (get-buffer-window log-buf)
+      (display-buffer log-buf)))
+  (setq transmute--task-registered t)
   (let* ((buf (generate-new-buffer (format " *transmute-%s*" name)))
          (process (start-process-shell-command name buf cmd)))
     (push process transmute-active-processes)
@@ -395,6 +502,23 @@ it will not prematurely trigger `transmute-after-batch-hook'."
     (transmute--log "[EXEC] %s" full-cmd)
     (shell-command full-cmd)))
 
+(defun transmute--delete-temp (path)
+  "Delete temporary PATH, which may name a file or a directory.
+Errors are ignored so cleanup never masks the task's own result."
+  (ignore-errors
+    (cond ((file-directory-p path) (delete-directory path t))
+          ((file-exists-p path) (delete-file path)))))
+
+(defun transmute--concat-escape-path (path)
+  "Escape PATH for use in an ffmpeg concat demuxer list file.
+Backslashes and single quotes are backslash-escaped so paths
+containing those characters cannot break or inject into the file."
+  (mapconcat (lambda (char)
+               (cond ((eq char ?\\) "\\\\")
+                     ((eq char ?') "\\'")
+                     (t (char-to-string char))))
+             path ""))
+
 (defun transmute--preserve-metadata (src dst)
   "Copy metadata from SRC to DST, excluding image dimensions and orientation.
 Sets Orientation to Normal."
@@ -410,15 +534,18 @@ Sets Orientation to Normal."
     (move-file-to-trash file)))
 
 (defun transmute--exif-cmd (src dst)
-  "Return exiftool command string to copy tags from SRC to DST, excluding image dimensions.
-Sets Orientation to Normal."
-  (format "exiftool -overwrite_original_in_place -Orientation=1 -n -TagsFromFile %s --ExifImageWidth --ExifImageHeight --Orientation %s"
+  "Return exiftool command string to copy tags from SRC to DST.
+Image dimensions, orientation, and the embedded EXIF thumbnail are
+excluded: the pixels may have changed size or rotation, so a stale
+thumbnail would misrepresent the image.  Orientation is set to Normal."
+  (format "exiftool -overwrite_original_in_place -Orientation=1 -n -TagsFromFile %s --ExifImageWidth --ExifImageHeight --ThumbnailImage --Orientation %s"
           (shell-quote-argument src) (shell-quote-argument dst)))
 
-(defun transmute--set-processed-xattr (file)
-  "Set user.do_backup.processed xattr on FILE.
+(defun transmute--processed-xattr-cmd (file)
+  "Return a command string setting the user.do_backup.processed xattr on FILE.
 This tells `do_backup` that the file has already been processed
-and should not be rotated or re-processed on the next backup run."
+and should not be rotated or re-processed on the next backup run.
+Returns nil when `setfattr` is not available."
   (when (executable-find "setfattr")
     (format "setfattr -n user.do_backup.processed -v 1 %s"
             (shell-quote-argument (expand-file-name file)))))
@@ -434,14 +561,22 @@ After processing all files, run `transmute-after-batch-hook' if no
 asynchronous processes are active."
   (declare (indent 1))
   `(let ((batch-files ,files))
-     (setq transmute--last-renames nil)
+     ;; Only reset shared rename/bookkeeping state when no other batch is
+     ;; still in flight, so overlapping batches accumulate instead of
+     ;; clobbering each other.
+     (unless transmute-active-processes
+       (setq transmute--last-renames nil))
      (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files))
-           transmute-batch-files batch-files)
+           transmute-batch-files (if transmute-active-processes
+                                     (append transmute-batch-files batch-files)
+                                   batch-files))
      (dolist (file batch-files)
-       (let ((default-directory (file-name-directory file)))
+       (let ((default-directory (file-name-directory file))
+             (transmute--task-registered nil))
          ,@body
-         ;; If this task was purely synchronous, increment completed count now
-         (when (null transmute-active-processes)
+         ;; A purely synchronous task never reaches a process sentinel, so
+         ;; count it here; asynchronous tasks are counted when they exit.
+         (unless transmute--task-registered
            (setq transmute-completed-tasks (1+ transmute-completed-tasks))
            (transmute--update-progress-display))))
      ;; If after processing all files no asynchronous tasks are pending,
@@ -454,7 +589,9 @@ asynchronous processes are active."
 (defmacro transmute-do-batch-async (files &rest body)
   "Process FILES one at a time, asynchronously.
 BODY is evaluated with `file' and `done'.  Call (funcall done)
-when processing for the current file completes."
+when processing for the current file completes.  If BODY signals an
+error the error is logged and the queue still advances, so a single
+bad file cannot stall the batch."
   (declare (indent 1))
   `(let* ((--queue ,files)
           (--continuation nil))
@@ -463,14 +600,31 @@ when processing for the current file completes."
              (if --queue
                  (let* ((file (pop --queue))
                         (default-directory (file-name-directory file))
-                        (done (lambda () (run-at-time 0 nil --continuation))))
-                   ,@body)
-               (setq transmute-total-tasks 0
-                     transmute-completed-tasks 0)
-               (run-hooks 'transmute-after-batch-hook))))
-     (setq transmute--last-renames nil)
+                        (--advanced nil)
+                        (done (lambda ()
+                                (unless --advanced
+                                  (setq --advanced t)
+                                  (setq transmute-completed-tasks
+                                        (1+ transmute-completed-tasks))
+                                  (transmute--update-progress-display)
+                                  (run-at-time 0 nil --continuation)))))
+                   (condition-case err
+                       (progn ,@body)
+                     (error
+                      (transmute--log "[ERROR] %s: %s" file
+                                      (error-message-string err))
+                      (funcall done))))
+               (when (null transmute-active-processes)
+                 (setq transmute-total-tasks 0
+                       transmute-completed-tasks 0)
+                 (run-hooks 'transmute-after-batch-hook)))))
+     (unless transmute-active-processes
+       (setq transmute--last-renames nil))
      (setq transmute-total-tasks (+ transmute-total-tasks (length --queue))
-           transmute-batch-files (copy-sequence --queue))
+           transmute-batch-files (if transmute-active-processes
+                                     (append transmute-batch-files
+                                             (copy-sequence --queue))
+                                   (copy-sequence --queue)))
      (funcall --continuation)))
 
 (defmacro transmute-do-batch-parallel (files &rest body)
@@ -479,12 +633,21 @@ BODY is evaluated for each FILE.  All files are started at once.
 The after-batch hook runs when all processes finish."
   (declare (indent 1))
   `(let ((batch-files ,files))
-     (setq transmute--last-renames nil)
+     (unless transmute-active-processes
+       (setq transmute--last-renames nil))
      (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files))
-           transmute-batch-files batch-files)
+           transmute-batch-files (if transmute-active-processes
+                                     (append transmute-batch-files batch-files)
+                                   batch-files))
      (dolist (file batch-files)
-       (let ((default-directory (file-name-directory file)))
-         ,@body))
+       (let ((default-directory (file-name-directory file))
+             (transmute--task-registered nil))
+         ,@body
+         ;; Tasks that started no process (e.g. a skipped file) are
+         ;; synchronous as far as the progress counter is concerned.
+         (unless transmute--task-registered
+           (setq transmute-completed-tasks (1+ transmute-completed-tasks))
+           (transmute--update-progress-display))))
      (when (null transmute-active-processes)
        (setq transmute-total-tasks 0
              transmute-completed-tasks 0)
@@ -533,9 +696,11 @@ written — the result is a pure pixel rotation compatible with all viewers."
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument file) (shell-quote-argument tmp)))
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument file)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (xattr-cmd (transmute--set-processed-xattr file))
+         (xattr-cmd (transmute--processed-xattr-cmd file))
          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd strip-orient touch-cmd cp-cmd rm-tmp xattr-cmd)) " && ")))
-    (transmute--run-command-async (file-name-nondirectory file) full-cmd)))
+    (transmute--run-command-async (file-name-nondirectory file) full-cmd
+                                  (lambda (_proc _code)
+                                    (transmute--delete-temp tmp)))))
 
 ;;; High-level Conversion Helpers
 
@@ -557,13 +722,14 @@ Preserves metadata and moves SRC to trash."
          (trash-fallback (unless (string= src dst)
                            (unless (executable-find transmute-trash-command)
                              src)))
-         (xattr-cmd (transmute--set-processed-xattr dst))
+         (xattr-cmd (transmute--processed-xattr-cmd dst))
          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
-    (transmute--run-command-async (file-name-nondirectory src) full-cmd
-      (when trash-fallback
-        (lambda (_proc exit-code)
-          (when (zerop exit-code)
-            (move-file-to-trash trash-fallback)))))))
+    (transmute--run-command-async
+     (file-name-nondirectory src) full-cmd
+     (lambda (_proc exit-code)
+       (transmute--delete-temp tmp)
+       (when (and trash-fallback (zerop exit-code))
+         (move-file-to-trash trash-fallback))))))
 
 (defun transmute--convert-image-copy (src dst magick-args preserve-metadata)
   "Internal core for `transmute-convert-image-copy'.
@@ -579,9 +745,11 @@ EXIF (including GPS) for sharing."
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (xattr-cmd (transmute--set-processed-xattr dst))
+         (xattr-cmd (transmute--processed-xattr-cmd dst))
          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp xattr-cmd)) " && ")))
-    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd
+                                  (lambda (_proc _code)
+                                    (transmute--delete-temp tmp)))))
 
 (defun transmute-convert-image-copy (src dst &rest magick-args)
   "Convert image SRC to DST using MAGICK-ARGS.
@@ -594,15 +762,20 @@ Preserves metadata."
   (let* ((src (expand-file-name src))
          (dst (expand-file-name dst))
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
-         (ffmpeg-cmd (mapconcat #'shell-quote-argument 
-                                (append (list "ffmpeg" "-hide_banner" "-loglevel" "warning" "-stats" "-y" "-i" src "-map_metadata" "0" "-threads" "8")
+         (ffmpeg-cmd (mapconcat #'shell-quote-argument
+                                (append (list "ffmpeg" "-hide_banner" "-loglevel" "warning" "-stats" "-y" "-i" src "-map_metadata" "0")
+                                        (when transmute-ffmpeg-threads
+                                          (list "-threads"
+                                                (number-to-string transmute-ffmpeg-threads)))
                                         ffmpeg-args
                                         (list tmp)) " "))
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
          (full-cmd (mapconcat #'identity (list ffmpeg-cmd touch-cmd cp-cmd rm-tmp) " && ")))
-    (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd
+                                  (lambda (_proc _code)
+                                    (transmute--delete-temp tmp)))))
 
 (defun transmute-convert-gan (src dst &rest gan-args)
   "Upscale image SRC to DST using realesrgan-ncnn-vulkan with GAN-ARGS.
@@ -622,13 +795,14 @@ Preserves metadata and moves SRC to trash."
          (trash-fallback (unless (string= src dst)
                            (unless (executable-find transmute-trash-command)
                              src)))
-         (xattr-cmd (transmute--set-processed-xattr dst))
+         (xattr-cmd (transmute--processed-xattr-cmd dst))
          (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
-    (transmute--run-command-async (file-name-nondirectory src) full-cmd
-      (when trash-fallback
-        (lambda (_proc exit-code)
-          (when (zerop exit-code)
-            (move-file-to-trash trash-fallback)))))))
+    (transmute--run-command-async
+     (file-name-nondirectory src) full-cmd
+     (lambda (_proc exit-code)
+       (transmute--delete-temp tmp)
+       (when (and trash-fallback (zerop exit-code))
+         (move-file-to-trash trash-fallback))))))
 
 ;;; Batch / Dired Integration
 
@@ -745,7 +919,7 @@ sequentially so Emacs stays responsive on large batches."
                              (shell-quote-argument tmp)
                              (shell-quote-argument src)))
              (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-             (xattr-cmd (transmute--set-processed-xattr src))
+             (xattr-cmd (transmute--processed-xattr-cmd src))
              (full-cmd (mapconcat #'identity
                                   (delq nil (list magick-cmd exif-cmd touch-cmd
                                                   cp-cmd rm-tmp xattr-cmd))
@@ -952,6 +1126,15 @@ and would otherwise cause a shell \"command not found\" (exit 127)."
                  names)
         (cl-some (lambda (p) (when (file-executable-p p) p)) paths))))
 
+(defun transmute--file-uri (path)
+  "Return a file:// URI for absolute PATH.
+Percent-encodes characters that would otherwise break the URI, so
+LibreOffice accepts profiles under directories with spaces (e.g. on
+Windows or a home directory containing spaces)."
+  (concat "file://"
+          (replace-regexp-in-string
+           "[ %#?]" (lambda (m) (format "%%%02X" (aref m 0))) path)))
+
 (defun transmute--document-convert (format)
   "Convert selected documents to FORMAT using LibreOffice headless.
 FORMAT is the soffice --convert-to filter, e.g. \"pdf\" or
@@ -969,7 +1152,8 @@ binary is found, the batch is aborted with a user error."
       (transmute-do-batch-async targets
         (let* ((dir (file-name-directory (expand-file-name file)))
                (profile (make-temp-file "lo-profile-" t))
-               (env-arg (format "-env:UserInstallation=file://%s" profile))
+               (env-arg (format "-env:UserInstallation=%s"
+                                (transmute--file-uri profile)))
                (cmd (format "%s --headless %s --convert-to %s --outdir %s %s"
                             (shell-quote-argument soffice)
                             (shell-quote-argument env-arg)
@@ -1107,8 +1291,9 @@ Saves to ~/Pictures/YYYYMMDDHH/."
         (let* ((parsed (transmute--parse-filename file))
                (basedir (cdr (assoc 'directory parsed)))
                (no-ext (cdr (assoc 'no-ext parsed)))
-               (out-prefix (if (> (length no-ext) 20) (substring no-ext 0 20) no-ext))
-               (dst-prefix (expand-file-name out-prefix basedir)))
+               ;; Use the full base name: truncating made distinct PDFs
+               ;; that share a prefix overwrite each other's output.
+               (dst-prefix (expand-file-name no-ext basedir)))
           (transmute--run-command-async (file-name-nondirectory file)
                                         (format "pdftoppm -r 300 -jpeg %s %s"
                                                 (shell-quote-argument file)
@@ -1127,7 +1312,7 @@ Saves to ~/Pictures/YYYYMMDDHH/."
                           (shell-quote-argument file)
                           (shell-quote-argument file)
                           (shell-quote-argument file)))
-             (xattr-cmd (transmute--set-processed-xattr file))
+             (xattr-cmd (transmute--processed-xattr-cmd file))
              (full-cmd (if xattr-cmd (format "%s && %s" cmd xattr-cmd) cmd)))
         (transmute--run-command-async (file-name-nondirectory file) full-cmd)))))
 
@@ -1135,26 +1320,38 @@ Saves to ~/Pictures/YYYYMMDDHH/."
 (defun transmute-picture-split (num-splits)
   "Split image horizontally into NUM-SPLITS parts."
   (interactive "nNumber of horizontal splits: ")
+  (unless (> num-splits 0)
+    (user-error "Number of splits must be a positive integer"))
   (when-let ((targets (transmute-get-filtered-targets 'image)))
     (transmute-do-batch targets
       (let* ((filename (file-name-nondirectory file))
              (no-ext (file-name-sans-extension filename))
-             (dims (shell-command-to-string (format "identify -format \"%%w %%h\" %s" (shell-quote-argument file))))
+             (dims (string-trim
+                    (shell-command-to-string
+                     (format "magick identify -format \"%%w %%h\" %s"
+                             (shell-quote-argument file)))))
              (dim-list (split-string dims " "))
              (width (string-to-number (car dim-list)))
              (height (string-to-number (cadr dim-list)))
              (slice-width (/ width num-splits))
              (cmds nil))
-        (dotimes (i num-splits)
-          (let* ((offset (* i slice-width))
-                 (out-file (format "%s_%d.png" no-ext i)))
-            (push (format "magick %s -crop %dx%d+%d+0 %s"
-                          (shell-quote-argument file)
-                          slice-width height offset
-                          (shell-quote-argument out-file))
-                  cmds)))
-        (transmute--run-command-async (file-name-nondirectory file)
-                                      (mapconcat #'identity (reverse cmds) " && "))))))
+        (if (or (<= width 0) (<= height 0))
+            (message "Could not determine image dimensions for %s" file)
+          (dotimes (i num-splits)
+            (let* ((offset (* i slice-width))
+                   ;; The last slice takes any remainder so no columns are lost.
+                   (slice-w (if (= i (1- num-splits))
+                                (- width offset)
+                              slice-width))
+                   (out-file (format "%s_%d.png" no-ext i)))
+              (push (format "magick %s -auto-orient -crop %dx%d+%d+0 %s"
+                            (shell-quote-argument file)
+                            slice-w height offset
+                            (shell-quote-argument out-file))
+                    cmds)))
+          (transmute--run-command-async
+           (file-name-nondirectory file)
+           (mapconcat #'identity (reverse cmds) " && ")))))))
 
 (defvar transmute--gallery-marked-files nil
   "Stores the current gallery marked files for `transmute-gallery-after-finalize'.")
@@ -1215,18 +1412,26 @@ Images are copied to ~/DCIM/content/static/<section>/ and a thumbnail
 is placed at ~/DCIM/content/static/<section>.jpg."
   (unless org-note-abort
     (let* ((target-dir (concat "~/DCIM/content/static/" transmute--gallery-section))
-           (files transmute--gallery-marked-files)
-           (thumb (nth (random (length files)) files))
-           (copied-files '()))
-      (make-directory target-dir t)
-      (copy-file thumb (concat "~/DCIM/content/static/" transmute--gallery-section ".jpg"))
-      (dolist (file files)
-        (let ((target-file (expand-file-name (file-name-nondirectory file) target-dir)))
-          (copy-file file target-file)
-          (push target-file copied-files)))
-      (when copied-files
-        (dolist (f copied-files)
-          (transmute-convert-image f f "-auto-orient" "-strip" "-quality" "50%" "-resize" "640x>" "-resize" "x640>")))
+           (files transmute--gallery-marked-files))
+      ;; `org-note-abort' can be nil while the marked-files list is empty if
+      ;; the capture was started by other means; avoid (random 0).
+      (when (and transmute--gallery-section files)
+        (let ((thumb (nth (random (length files)) files))
+              (copied-files '()))
+          (make-directory target-dir t)
+          (copy-file thumb (concat "~/DCIM/content/static/"
+                                   transmute--gallery-section ".jpg")
+                     t)
+          (dolist (file files)
+            (let ((target-file (transmute--unique-name
+                                target-dir (file-name-nondirectory file))))
+              (copy-file file target-file)
+              (push target-file copied-files)))
+          (when copied-files
+            (dolist (f copied-files)
+              (transmute-convert-image f f "-auto-orient" "-strip"
+                                       "-quality" "50%"
+                                       "-resize" "640x>" "-resize" "x640>")))))
       (setq transmute--gallery-marked-files nil
             transmute--gallery-section nil))))
 
@@ -1278,7 +1483,8 @@ sanitised."
              (file-readable-p transmute-tag-list-file))
     (with-temp-buffer
       (insert-file-contents transmute-tag-list-file)
-      (split-string (buffer-string) "\n" t))))
+      ;; Accept CRLF files (e.g. edited on Windows) as well as LF.
+      (split-string (buffer-string) "\r\n\\|\n" t))))
 
 ;;;###autoload
 (defun transmute-tag-from-list (tags)
@@ -1334,7 +1540,10 @@ Runs asynchronously so Emacs stays responsive during batch processing."
                                 (ext (cdr (assoc 'extension parsed)))
                                 (basedir (cdr (assoc 'directory parsed))))
                            (if (not (string= formatted-date current-ts))
-                               (let* ((new-base (format "%s--%s" formatted-date label))
+                                (let* ((new-base
+                                        (if (string-empty-p label)
+                                            formatted-date
+                                          (format "%s--%s" formatted-date label)))
                                       (new-name (if tags-raw
                                                     (format "%s/%s__%s.%s" basedir new-base tags-raw ext)
                                                   (format "%s/%s.%s" basedir new-base ext)))
@@ -1345,9 +1554,14 @@ Runs asynchronously so Emacs stays responsive during batch processing."
                                                         (format "%s/%s%d__%s.%s" basedir new-base counter tags-raw ext)
                                                       (format "%s/%s%d.%s" basedir new-base counter ext)))
                                    (cl-incf counter))
-                                 (unless (string= (expand-file-name final-name) (expand-file-name file))
-                                   (transmute--log "%s -> %s" file final-name)
-                                   (transmute--rename-file-safe file final-name)))
+                                 (let ((abs-orig (expand-file-name file))
+                                       (abs-final (expand-file-name final-name)))
+                                   (unless (string= abs-final abs-orig)
+                                     (transmute--log "%s -> %s" abs-orig abs-final)
+                                     (setq transmute--last-renames
+                                           (cons (cons abs-orig abs-final)
+                                                 transmute--last-renames))
+                                     (transmute--rename-file-safe abs-orig abs-final))))
                              (message "#### %s : NO CHANGE" file)))
                        (funcall done)))))
              ;; When the date came from a modify-time tag, first bake it
@@ -1369,10 +1583,9 @@ Runs asynchronously so Emacs stays responsive during batch processing."
     (transmute-do-batch targets
       (let* ((parsed (transmute--parse-filename file))
              (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".mp3")))
-        (transmute--run-command-async (file-name-nondirectory file)
-                                      (format "ffmpeg -hide_banner -loglevel warning -stats -y -i %s -b:a 192k %s"
-                                              (shell-quote-argument file)
-                                              (shell-quote-argument (expand-file-name dst))))))))
+        ;; Route through the shared helper so the output is written to a
+        ;; temp file first (no partial MP3s) and metadata/mtime survive.
+        (transmute-convert-video file dst "-b:a" "192k")))))
 
 ;;;###autoload
 (defun transmute-audio-info ()
@@ -1444,7 +1657,9 @@ Runs asynchronously so Emacs stays responsive during batch processing."
                  (label (cdr (assoc 'label parsed)))
                  (ext (cdr (assoc 'extension parsed)))
                  (basedir (cdr (assoc 'directory parsed)))
-                 (new-base (format "%s--%s" formatted-date label))
+                          (new-base (if (string-empty-p label)
+                                        formatted-date
+                                      (format "%s--%s" formatted-date label)))
                  (new-name (format "%s/%s__%s.%s" basedir new-base formatted-tags ext))
                  (final-name new-name)
                  (counter 1))
@@ -1498,7 +1713,9 @@ their original form."
                           (label (cdr (assoc 'label parsed)))
                           (ext (cdr (assoc 'extension parsed)))
                           (basedir (cdr (assoc 'directory parsed)))
-                          (new-base (format "%s--%s" formatted-date label))
+                 (new-base (if (string-empty-p label)
+                               formatted-date
+                             (format "%s--%s" formatted-date label)))
                           (new-name (format "%s/%s__%s.%s" basedir new-base formatted-tags ext))
                           (final-name new-name)
                           (counter 1))
@@ -1684,7 +1901,7 @@ appended.  Files whose names are already clean are left untouched."
       (let* ((parsed (transmute--parse-filename file))
              (timestamp (format-time-string "%Y%m%d%H%M%S"))
              (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-sped-" timestamp ".mp4")))
-        (transmute-convert-video file dst "-threads" "8" "-an" "-filter:v" "setpts=0.5*PTS" "-r" "30")))))
+        (transmute-convert-video file dst "-an" "-filter:v" "setpts=0.5*PTS" "-r" "30")))))
 
 ;;;###autoload
 (defun transmute-picture-fix-whatsapp ()
@@ -1708,27 +1925,41 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                            (concat "--IMG-" imgdate (match-string 1 filename)))
                           (t (concat "--" filename))))
                    (newname (concat newtimestamp rest))
+                   (abs-file (expand-file-name file))
                    (abs-newname (expand-file-name newname basedir))
                    (date-fmt (format "%s:%s:%s 12:00:00"
                                      (substring imgdate 0 4)
                                      (substring imgdate 4 6)
-                                     (substring imgdate 6 8))))
+                                     (substring imgdate 6 8)))
+                   (mtime (encode-time 0 0 12
+                                       (string-to-number (substring imgdate 6 8))
+                                       (string-to-number (substring imgdate 4 6))
+                                       (string-to-number (substring imgdate 0 4)))))
               (transmute--log "[FIX] %s -> %s" filename newname)
               (let ((cmd (format "exiftool -overwrite_original %s %s %s %s"
                                  (shell-quote-argument (format "-DateTimeOriginal=%s" date-fmt))
                                  (shell-quote-argument (format "-CreateDate=%s" date-fmt))
                                  (shell-quote-argument (format "-ModifyDate=%s" date-fmt))
-                                 (shell-quote-argument file))))
+                                 (shell-quote-argument abs-file))))
                 (transmute--run-command-async
                  (file-name-nondirectory file) cmd
                  (lambda (_proc exit-code)
                    (when (zerop exit-code)
-                     (transmute--run-command "touch" "-t" (concat imgdate "1200") file)
-                     (let ((abs-orig (expand-file-name file)))
-                       (unless (string= abs-orig abs-newname)
-                         (setq transmute--last-renames (cons (cons abs-orig abs-newname) transmute--last-renames))
-                         (transmute--rename-file-safe abs-orig abs-newname t)))))))))
-        (transmute--log "[SKIP] %s: Does not match WhatsApp pattern" filename)))))
+                     ;; Use the absolute path and an Emacs primitive: the
+                     ;; batch's `default-directory' binding is long gone by
+                     ;; the time this callback runs.
+                     (set-file-times abs-file mtime)
+                     (cond
+                      ((string= abs-file abs-newname) nil)
+                      ((file-exists-p abs-newname)
+                       (transmute--log "[WARN] Not renaming %s: %s already exists"
+                                       filename newname))
+                      (t
+                       (setq transmute--last-renames
+                             (cons (cons abs-file abs-newname)
+                                   transmute--last-renames))
+                       (transmute--rename-file-safe abs-file abs-newname))))))))
+        (transmute--log "[SKIP] %s: Does not match WhatsApp pattern" filename))))))
 
 ;;;###autoload
 (defun transmute-video-slow-down ()
@@ -1752,12 +1983,14 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
            (output-file (expand-file-name (format "concat-%s.mp4" (format-time-string "%Y%m%d%H%M%S")) basedir)))
       (with-temp-file tmp-file
         (dolist (f sorted-targets)
-          (insert (format "file '%s'\n" (expand-file-name f)))))
-      (let ((cmd (format "ffmpeg -f concat -safe 0 -i %s -c copy %s && rm %s"
+          (insert (format "file '%s'\n"
+                          (transmute--concat-escape-path (expand-file-name f))))))
+      (let ((cmd (format "ffmpeg -f concat -safe 0 -i %s -c copy %s"
                          (shell-quote-argument tmp-file)
-                         (shell-quote-argument output-file)
-                         (shell-quote-argument tmp-file))))
-        (transmute--run-command-async "Concatenate" cmd)))))
+                         (shell-quote-argument output-file))))
+        (transmute--run-command-async "Concatenate" cmd
+                                      (lambda (_proc _code)
+                                        (transmute--delete-temp tmp-file)))))))
 
 ;;;###autoload
 (defun transmute-video-double ()
@@ -1771,13 +2004,17 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
              (ext (file-name-extension base))
              (dst (expand-file-name (format "%s-double.%s" no-ext ext) (file-name-directory (expand-file-name file)))))
         (with-temp-file tmp-list
-          (insert (format "file '%s'\n" (expand-file-name file)))
-          (insert (format "file '%s'\n" (expand-file-name file))))
-        (let ((cmd (format "ffmpeg -f concat -safe 0 -i %s -c copy %s && rm %s"
+          (insert (format "file '%s'\n"
+                          (transmute--concat-escape-path (expand-file-name file))))
+          (insert (format "file '%s'\n"
+                          (transmute--concat-escape-path (expand-file-name file)))))
+        (let ((cmd (format "ffmpeg -f concat -safe 0 -i %s -c copy %s"
                            (shell-quote-argument tmp-list)
-                           (shell-quote-argument dst)
-                           (shell-quote-argument tmp-list))))
-          (transmute--run-command-async (format "Double %s" base) cmd))))))
+                           (shell-quote-argument dst))))
+          (transmute--run-command-async
+           (format "Double %s" base) cmd
+           (lambda (_proc _code)
+             (transmute--delete-temp tmp-list))))))))
 
 ;;;###autoload
 (defun transmute-video-extract-frames (fps)
@@ -1786,7 +2023,10 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
   (when-let ((targets (transmute-get-filtered-targets 'video)))
     (transmute-do-batch targets
       (let* ((basedir (file-name-directory (expand-file-name file)))
-             (frames-dir (expand-file-name "frames" basedir)))
+             (no-ext (file-name-sans-extension (file-name-nondirectory file)))
+             ;; One directory per video so frames from different videos in
+             ;; the same folder do not overwrite each other.
+             (frames-dir (expand-file-name (concat no-ext "-frames") basedir)))
         (unless (file-directory-p frames-dir)
           (make-directory frames-dir t))
         (let ((cmd (format "ffmpeg -y -i %s -vf fps=%d %s/%%07d.jpg"
@@ -1867,16 +2107,23 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
              (no-ext (file-name-sans-extension base))
              (ext (file-name-extension base))
              (dst (expand-file-name (format "%s-bgm.%s" no-ext ext) (file-name-directory (expand-file-name file))))
-             (duration (string-to-number (shell-command-to-string (format "ffprobe -v quiet -of csv=p=0 -show_entries format=duration %s" (shell-quote-argument file)))))
-             (fade-duration 5)
-             (fade-start (- duration fade-duration))
-             (cmd (format "ffmpeg -y -i %s -stream_loop -1 -i %s -map 0:v:0 -map 1:a:0 -t %f -af \"afade=t=out:st=%f:d=%d\" -c:v copy %s"
-                          (shell-quote-argument file)
-                          (shell-quote-argument music)
-                          duration
-                          fade-start fade-duration
-                          (shell-quote-argument dst))))
-        (transmute--run-command-async (format "BG Music %s" base) cmd)))))
+             (duration (string-to-number (shell-command-to-string (format "ffprobe -v quiet -of csv=p=0 -show_entries format=duration %s" (shell-quote-argument file))))))
+        (if (<= duration 0)
+            (message "Could not determine duration for %s" file)
+          (let* ((fade-duration 5)
+                 ;; A negative fade start made afade fail on short clips.
+                 (fade-start (max 0 (- duration fade-duration)))
+                 (fade-arg (if (> duration fade-duration)
+                               (format "-af \"afade=t=out:st=%f:d=%d\""
+                                       fade-start fade-duration)
+                             ""))
+                 (cmd (format "ffmpeg -y -i %s -stream_loop -1 -i %s -map 0:v:0 -map 1:a:0 -t %f %s -c:v copy %s"
+                              (shell-quote-argument file)
+                              (shell-quote-argument music)
+                              duration
+                              fade-arg
+                              (shell-quote-argument dst))))
+            (transmute--run-command-async (format "BG Music %s" base) cmd)))))))
 
 ;;;###autoload
 (defun transmute-video-rescale (width height)
@@ -1936,7 +2183,8 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
   (let ((dim (format "%dx%d" width height)))
     (when-let ((targets (transmute-get-filtered-targets 'image)))
       (transmute-do-batch targets
-        (transmute-convert-image file file "-resize" (concat dim "^") "-gravity" "center" "-extent" dim)))))
+        (transmute-convert-image file file "-auto-orient" "-resize" (concat dim "^")
+                                 "-gravity" "center" "-extent" dim)))))
 
 ;;;###autoload
 (defun transmute-video-cut (start duration)
@@ -2204,10 +2452,21 @@ Clears modified flags and orphaned lock files immediately to avoid
 \"Buffer modified; kill anyway?\" prompts; defers cache refresh."
   (let ((files (mapcar #'expand-file-name transmute-batch-files))
         (renames transmute--last-renames)
-        (inhibit-display transmute--inhibit-display-refresh-once))
+        (inhibit-display transmute--inhibit-display-refresh-once)
+        (affected-dirs nil))
 
-    ;; Clear the flag immediately
-    (setq transmute--inhibit-display-refresh-once nil)
+    ;; Consume the shared state immediately so a batch started while this
+    ;; one is still refreshing does not accumulate stale entries.
+    (setq transmute--inhibit-display-refresh-once nil
+          transmute-batch-files nil
+          transmute--last-renames nil)
+    (setq affected-dirs
+          (delete-dups
+           (delq nil
+                 (append (mapcar #'file-name-directory files)
+                         (mapcar (lambda (r)
+                                   (file-name-directory (cdr r)))
+                                 renames)))))
 
     ;; -- Immediate cleanup: must happen before user can interact --
 
@@ -2240,24 +2499,29 @@ Clears modified flags and orphaned lock files immediately to avoid
                    ;;    Skip image-dired display buffers — clearing their modified
                    ;;    flag is enough; refreshing them is handled by image-dired itself.
                    (dolist (buf (buffer-list))
-                     (with-current-buffer buf
-                       (unless (string-match-p "\\`\\*image-dired-display-image\\*"
-                                               (buffer-name buf))
-                         (let ((bfn (and buffer-file-name (expand-file-name buffer-file-name))))
-                           (when bfn
-                             (let ((new-name (cdr (assoc bfn renames))))
-                               (cond
-                                (new-name
-                                 (set-buffer-modified-p nil)
-                                 (set-visited-file-name new-name nil t)
-                                 (unlock-buffer)
-                                 (revert-buffer nil t))
-                                ((member bfn files)
-                                 (set-buffer-modified-p nil)
-                                 (unlock-buffer)
-                                 (revert-buffer nil t))))))
-                         (when (derived-mode-p 'dired-mode)
-                           (revert-buffer nil t)))))
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (unless (string-match-p "\\`\\*image-dired-display-image\\*"
+                                                 (buffer-name buf))
+                           (let ((bfn (and buffer-file-name (expand-file-name buffer-file-name))))
+                             (when bfn
+                               (let ((new-name (cdr (assoc bfn renames))))
+                                 (cond
+                                  (new-name
+                                   (set-buffer-modified-p nil)
+                                   (set-visited-file-name new-name nil t)
+                                   (unlock-buffer)
+                                   (revert-buffer nil t))
+                                  ((member bfn files)
+                                   (set-buffer-modified-p nil)
+                                   (unlock-buffer)
+                                   (revert-buffer nil t))))))
+                           ;; Only revert dired buffers showing a directory
+                           ;; this batch actually touched.
+                           (when (and (derived-mode-p 'dired-mode)
+                                      (member (expand-file-name default-directory)
+                                              affected-dirs))
+                             (revert-buffer nil t))))))
 
                    ;; 5. Refresh the thumbnail view
                    (when (fboundp 'dired-image-thumbnail-invalidate-files)
@@ -2265,13 +2529,14 @@ Clears modified flags and orphaned lock files immediately to avoid
                    (if (fboundp 'dired-image-thumbnail-refresh-all)
                        (dired-image-thumbnail-refresh-all renames)
                      (dolist (buf (buffer-list))
-                       (with-current-buffer buf
-                         (when (derived-mode-p 'image-dired-thumbnail-mode)
-                           (when (and (boundp 'dired-image-thumbnail--dimension-cache)
-                                      dired-image-thumbnail--dimension-cache)
-                             (clrhash dired-image-thumbnail--dimension-cache))
-                           (when (fboundp 'dired-image-thumbnail-refresh)
-                             (dired-image-thumbnail-refresh))))))
+                       (when (buffer-live-p buf)
+                         (with-current-buffer buf
+                           (when (derived-mode-p 'image-dired-thumbnail-mode)
+                             (when (and (boundp 'dired-image-thumbnail--dimension-cache)
+                                        dired-image-thumbnail--dimension-cache)
+                               (clrhash dired-image-thumbnail--dimension-cache))
+                             (when (fboundp 'dired-image-thumbnail-refresh)
+                               (dired-image-thumbnail-refresh)))))))
 
                    ;; 6. Finally, refresh the full-size display if active
                    (when (and (not inhibit-display)

@@ -27,6 +27,32 @@ silently, produced wrong output, or destroyed metadata.
 - *Retag by date* -- `transmute-retag-by-date` no longer runs `exiftool -all=`, which wiped every tag (camera, lens, GPS, orientation, keywords) before writing the two date fields. Only `CreateDate` and `DateTimeOriginal` are written from the modify date now.
 - *Organise collisions* -- `transmute-picture-organise` refuses to overwrite an existing file in the `YYYYMM` destination folder. It logs `[WARN] Not moving ... already exists` and leaves the main file and its sidecars in place instead of silently replacing the existing file via `ok-if-already-exists`.
 - *File-lock cleanup* -- lock cleanup now deletes only genuinely orphaned Emacs locks: the `user@host.pid:boot` symlink target must belong to the current user and host, and the recorded PID must no longer be running. Live locks, including those held by the running Emacs session, are preserved.
+- *Async batch error handling* -- `transmute-do-batch-async` now logs the error and advances the queue when a body signals, instead of stalling the whole batch; `done` is also idempotent so a completion callback cannot advance the queue twice.
+- *Batch progress accounting* -- `transmute-do-batch` and `transmute-do-batch-parallel` now track explicitly whether a task started an asynchronous process (new `transmute--task-registered` flag) rather than guessing from the global process list. Synchronous and skipped tasks are counted exactly once, and progress is no longer stuck at 0% for batches whose workers are not registered processes (compress, document conversion, organise, retag).
+- *Overlapping batches* -- starting a second batch while one is still running no longer clobbers the first batch's rename and file lists; state is merged and consumed once the last batch drains.
+- *Retag rename tracking* -- `transmute-retag-by-date` now records old -> new names in `transmute--last-renames`, so thumbnail views refresh renamed files correctly.
+- *Crop and split orientation* -- `transmute-picture-crop` and `transmute-picture-split` now pass `-auto-orient`, so images with an EXIF rotation are cropped/split on the upright pixels.
+- *Image split* -- uses `magick identify` (ImageMagick 7) with validation, and the final slice absorbs the remainder instead of losing the last `width mod num-splits` columns.
+- *ffmpeg concat lists* -- single quotes and backslashes in file names are escaped before being written to the concat demuxer list, and the temporary list is deleted in the completion callback whatever the exit code.
+- *Temporary file cleanup* -- image/video conversion helpers now remove their temp files (and the montage temp directory) on failure as well as on success.
+- *Short background-music clips* -- `transmute-video-background-music` clamps the fade start to 0 and skips the fade when the clip is shorter than the fade, instead of generating an invalid negative `afade` start; an unknown duration is reported instead of producing an empty output.
+- *Frame extraction* -- `transmute-video-extract-frames` writes into a per-video `<name>-frames/` directory so videos in the same folder no longer overwrite each other's frames.
+- *Audio conversion* -- `transmute-audio-convert` now uses the shared conversion helper, so output is staged in a temp file, metadata is preserved, and mtime is restored.
+- *Filename parsing* -- extra `__` segments are kept as tag data, non-date `--` text is preserved in the label, a bare 14-digit timestamp is recognised, and `no-tag` no longer gains a trailing dot on extension-less files.
+- *Gallery capture* -- `transmute-gallery-after-finalize` guards against an empty selection and copies images with collision-safe names.
+- *Tag list* -- the default `transmute-tag-list-file` is now `~/bin/category-list-uniq.txt` (no hard-coded home directory), and CRLF line endings are tolerated.
+- *PDF image extraction* -- `transmute-picture-from-pdf` no longer truncates the output prefix to 20 characters, so PDFs with a shared prefix cannot overwrite each other's output.
+- *WhatsApp fix* -- the completion callback uses the absolute path and `set-file-times` (instead of a `touch` shell-out in a long-gone `default-directory`), and refuses to overwrite an existing target file.
+- *Stale EXIF thumbnails* -- metadata copies now exclude `ThumbnailImage`, so resized or rotated images do not embed a stale thumbnail.
+- *Thumbnail refresh scope* -- `transmute-refresh-thumbnail` only reverts dired buffers for directories the batch actually touched, checks that buffers are live, and consumes the shared batch state immediately.
+- *LibreOffice profile URI* -- the per-file user profile path is percent-encoded, so headless conversion works when the temp directory contains spaces.
+- *xattr helper naming* -- `transmute--set-processed-xattr` is renamed `transmute--processed-xattr-cmd` to reflect that it returns a command string rather than setting the xattr itself.
+
+*** Improvements
+
+- *Asynchronous info buffers* -- `transmute--display-info` (image/video/audio/tag info) now runs its commands one at a time in the background and appends output as it arrives, so Emacs no longer blocks on large selections.
+- *Log window handling* -- `transmute--run-command-async` only displays the log buffer when it is not already visible, instead of raising it for every started task.
+- *Configurable ffmpeg threads* -- the hard-coded `-threads 8` was replaced by the `transmute-ffmpeg-threads` option (default nil = let ffmpeg decide).
 
 ** <<2026-09-01 Tue>> *0.7.1*
 
