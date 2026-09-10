@@ -11,6 +11,23 @@ project's main git repository.
 
 * Versions
 
+** <<2026-09-10 Thu>> *0.7.2*
+
+Reliability fixes -- corrected several cases where conversions failed
+silently, produced wrong output, or destroyed metadata.
+
+*** Bugfixes
+
+- *Byte-compiled installs* -- `transmute-picture-set-xattr` no longer fails with `invalid-function` when the package is byte-compiled. The `transmute-do-batch`, `transmute-do-batch-async`, and `transmute-do-batch-parallel` macros are now defined before their first use, so the byte compiler expands them instead of emitting ordinary function calls that only fail at runtime.
+- *Backup xattr target* -- `transmute-convert-image` and `transmute-convert-gan` now set `user.do_backup.processed` on the destination file instead of the source, which had already been moved to the trash. Previously the trailing `setfattr` step failed on the trashed path, so the task was reported as FAILED even though the conversion had succeeded, and `do_backup` never saw the marker.
+- *Idempotent renames* -- `transmute-picture-tag-rename`, `transmute-tag-and-rename`, and `transmute-retag-by-date` no longer append a numeric suffix when the computed filename is identical to the file's current name. The new `transmute--name-collides-p` helper distinguishes a genuine collision from the file matching itself, so re-running a rename on an already-conforming file is now a no-op.
+- *Orientation reset* -- `transmute-picture-orientation-reset` now bakes any EXIF orientation into the pixels with `magick -auto-orient` *before* clearing the orientation tag. The previous order reset the tag first, making `-auto-orient` a no-op and leaving portrait images visually unrotated after `-strip` removed the evidence.
+- *Video top/tail trim* -- `transmute-video-toptail` now passes `-t` a duration of `(- end-time trim-start)` rather than the end timestamp itself. Since `-t` is an output duration, the old value meant the clip still ran to the original end, so the tail trim was silently ignored.
+- *Email metadata stripping* -- `transmute-picture-email` now genuinely strips EXIF/GPS metadata. Metadata copying was refactored into `transmute--convert-image-copy` with an explicit `preserve-metadata` argument; the email path passes nil. The `transmute-picture-compress` docstring no longer claims to strip metadata that the exiftool step restores.
+- *Retag by date* -- `transmute-retag-by-date` no longer runs `exiftool -all=`, which wiped every tag (camera, lens, GPS, orientation, keywords) before writing the two date fields. Only `CreateDate` and `DateTimeOriginal` are written from the modify date now.
+- *Organise collisions* -- `transmute-picture-organise` refuses to overwrite an existing file in the `YYYYMM` destination folder. It logs `[WARN] Not moving ... already exists` and leaves the main file and its sidecars in place instead of silently replacing the existing file via `ok-if-already-exists`.
+- *File-lock cleanup* -- lock cleanup now deletes only genuinely orphaned Emacs locks: the `user@host.pid:boot` symlink target must belong to the current user and host, and the recorded PID must no longer be running. Live locks, including those held by the running Emacs session, are preserved.
+
 ** <<2026-09-01 Tue>> *0.7.1*
 
 Thumbnail keybinding -- `I` now opens the transmute menu straight from image-dired's thumbnail buffer.

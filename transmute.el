@@ -322,6 +322,14 @@ This prevents \"changed on disk\" prompts from buffers visiting FILE."
           (set-visited-file-name new-abs nil t))))
     (rename-file old-abs new-abs ok-if-already-exists)))
 
+(defun transmute--name-collides-p (candidate original)
+  "Return non-nil when CANDIDATE names an existing file other than ORIGINAL.
+Used by rename loops so a file whose computed name is unchanged is not
+treated as a collision with itself."
+  (and (file-exists-p candidate)
+       (not (string= (expand-file-name candidate)
+                     (expand-file-name original)))))
+
 (defun transmute--run-command-async (name cmd &optional callback)
   "Run CMD string asynchronously as NAME.
 Optional CALLBACK is called with (PROCESS EXIT-STATUS) after completion."
@@ -415,6 +423,73 @@ and should not be rotated or re-processed on the next backup run."
     (format "setfattr -n user.do_backup.processed -v 1 %s"
             (shell-quote-argument (expand-file-name file)))))
 
+;;; Batch Macros
+;;
+;; These are defined before their first use (`transmute-picture-set-xattr')
+;; so the byte compiler expands them instead of emitting funcalls.
+
+(defmacro transmute-do-batch (files &rest body)
+  "Run BODY for each file in FILES, binding `file' to current file.
+After processing all files, run `transmute-after-batch-hook' if no
+asynchronous processes are active."
+  (declare (indent 1))
+  `(let ((batch-files ,files))
+     (setq transmute--last-renames nil)
+     (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files))
+           transmute-batch-files batch-files)
+     (dolist (file batch-files)
+       (let ((default-directory (file-name-directory file)))
+         ,@body
+         ;; If this task was purely synchronous, increment completed count now
+         (when (null transmute-active-processes)
+           (setq transmute-completed-tasks (1+ transmute-completed-tasks))
+           (transmute--update-progress-display))))
+     ;; If after processing all files no asynchronous tasks are pending,
+     ;; run the refresh hook immediately.
+     (when (null transmute-active-processes)
+       (setq transmute-total-tasks 0
+             transmute-completed-tasks 0)
+       (run-hooks 'transmute-after-batch-hook))))
+
+(defmacro transmute-do-batch-async (files &rest body)
+  "Process FILES one at a time, asynchronously.
+BODY is evaluated with `file' and `done'.  Call (funcall done)
+when processing for the current file completes."
+  (declare (indent 1))
+  `(let* ((--queue ,files)
+          (--continuation nil))
+     (setq --continuation
+           (lambda ()
+             (if --queue
+                 (let* ((file (pop --queue))
+                        (default-directory (file-name-directory file))
+                        (done (lambda () (run-at-time 0 nil --continuation))))
+                   ,@body)
+               (setq transmute-total-tasks 0
+                     transmute-completed-tasks 0)
+               (run-hooks 'transmute-after-batch-hook))))
+     (setq transmute--last-renames nil)
+     (setq transmute-total-tasks (+ transmute-total-tasks (length --queue))
+           transmute-batch-files (copy-sequence --queue))
+     (funcall --continuation)))
+
+(defmacro transmute-do-batch-parallel (files &rest body)
+  "Process FILES in parallel, asynchronously.
+BODY is evaluated for each FILE.  All files are started at once.
+The after-batch hook runs when all processes finish."
+  (declare (indent 1))
+  `(let ((batch-files ,files))
+     (setq transmute--last-renames nil)
+     (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files))
+           transmute-batch-files batch-files)
+     (dolist (file batch-files)
+       (let ((default-directory (file-name-directory file)))
+         ,@body))
+     (when (null transmute-active-processes)
+       (setq transmute-total-tasks 0
+             transmute-completed-tasks 0)
+       (run-hooks 'transmute-after-batch-hook))))
+
 ;;;###autoload
 (defun transmute-picture-show-xattr ()
   "Show user.do_backup.processed xattr for selected files.
@@ -482,7 +557,7 @@ Preserves metadata and moves SRC to trash."
          (trash-fallback (unless (string= src dst)
                            (unless (executable-find transmute-trash-command)
                              src)))
-         (xattr-cmd (transmute--set-processed-xattr src))
+         (xattr-cmd (transmute--set-processed-xattr dst))
          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd
       (when trash-fallback
@@ -490,20 +565,28 @@ Preserves metadata and moves SRC to trash."
           (when (zerop exit-code)
             (move-file-to-trash trash-fallback)))))))
 
-(defun transmute-convert-image-copy (src dst &rest magick-args)
-  "Convert image SRC to DST using MAGICK-ARGS.
-Preserves metadata, keeps SRC."
+(defun transmute--convert-image-copy (src dst magick-args preserve-metadata)
+  "Internal core for `transmute-convert-image-copy'.
+MAGICK-ARGS is a list of arguments passed to magick.  When
+PRESERVE-METADATA is non-nil, tags are copied from SRC to DST;
+when nil, DST keeps only the metadata magick wrote, which strips
+EXIF (including GPS) for sharing."
   (let* ((src (expand-file-name src))
          (dst (expand-file-name dst))
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
          (magick-cmd (mapconcat #'shell-quote-argument (append (list "magick" src) magick-args (list tmp)) " "))
-         (exif-cmd (transmute--exif-cmd src tmp))
+         (exif-cmd (when preserve-metadata (transmute--exif-cmd src tmp)))
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
          (xattr-cmd (transmute--set-processed-xattr dst))
          (full-cmd (mapconcat #'identity (delq nil (list magick-cmd exif-cmd touch-cmd cp-cmd rm-tmp xattr-cmd)) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd)))
+
+(defun transmute-convert-image-copy (src dst &rest magick-args)
+  "Convert image SRC to DST using MAGICK-ARGS.
+Preserves metadata, keeps SRC."
+  (transmute--convert-image-copy src dst magick-args t))
 
 (defun transmute-convert-video (src dst &rest ffmpeg-args)
   "Convert video SRC to DST using FFMPEG-ARGS.
@@ -539,7 +622,7 @@ Preserves metadata and moves SRC to trash."
          (trash-fallback (unless (string= src dst)
                            (unless (executable-find transmute-trash-command)
                              src)))
-         (xattr-cmd (transmute--set-processed-xattr src))
+         (xattr-cmd (transmute--set-processed-xattr dst))
          (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
     (transmute--run-command-async (file-name-nondirectory src) full-cmd
       (when trash-fallback
@@ -607,68 +690,6 @@ Otherwise ask for file."
           filtered)
       files)))
 
-(defmacro transmute-do-batch (files &rest body)
-  "Run BODY for each file in FILES, binding 'file' to current file.
-After processing all files, run `transmute-after-batch-hook' if no
-asynchronous processes are active."
-  (declare (indent 1))
-  `(let ((batch-files ,files))
-     (setq transmute--last-renames nil)
-     (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files))
-           transmute-batch-files batch-files)
-     (dolist (file batch-files)
-       (let ((default-directory (file-name-directory file)))
-         ,@body
-         ;; If this task was purely synchronous, increment completed count now
-         (when (null transmute-active-processes)
-           (setq transmute-completed-tasks (1+ transmute-completed-tasks))
-           (transmute--update-progress-display))))
-     ;; If after processing all files no asynchronous tasks are pending,
-     ;; run the refresh hook immediately.
-     (when (null transmute-active-processes)
-       (setq transmute-total-tasks 0
-             transmute-completed-tasks 0)
-       (run-hooks 'transmute-after-batch-hook))))
-
-(defmacro transmute-do-batch-async (files &rest body)
-  "Process FILES one at a time, asynchronously.
-BODY is evaluated with `file' and `done'.  Call (funcall done)
-when processing for the current file completes."
-  (declare (indent 1))
-  `(let* ((--queue ,files)
-          (--continuation nil))
-     (setq --continuation
-           (lambda ()
-             (if --queue
-                 (let* ((file (pop --queue))
-                        (default-directory (file-name-directory file))
-                        (done (lambda () (run-at-time 0 nil --continuation))))
-                   ,@body)
-               (setq transmute-total-tasks 0
-                     transmute-completed-tasks 0)
-               (run-hooks 'transmute-after-batch-hook))))
-     (setq transmute--last-renames nil)
-     (setq transmute-total-tasks (+ transmute-total-tasks (length --queue))
-           transmute-batch-files (copy-sequence --queue))
-     (funcall --continuation)))
-
-(defmacro transmute-do-batch-parallel (files &rest body)
-  "Process FILES in parallel, asynchronously.
-BODY is evaluated for each FILE.  All files are started at once.
-The after-batch hook runs when all processes finish."
-  (declare (indent 1))
-  `(let ((batch-files ,files))
-     (setq transmute--last-renames nil)
-     (setq transmute-total-tasks (+ transmute-total-tasks (length batch-files))
-           transmute-batch-files batch-files)
-     (dolist (file batch-files)
-       (let ((default-directory (file-name-directory file)))
-         ,@body))
-     (when (null transmute-active-processes)
-       (setq transmute-total-tasks 0
-             transmute-completed-tasks 0)
-       (run-hooks 'transmute-after-batch-hook))))
-
 ;;; Specific Commands
 
 ;;;###autoload
@@ -702,9 +723,10 @@ The after-batch hook runs when all processes finish."
 ;;;###autoload
 (defun transmute-picture-compress ()
   "Compress images in place, keeping resolution.
-Strips metadata and re-encodes at `transmute-compress-quality'.
-No resizing is performed — pixel dimensions are preserved.
-Processes files sequentially so Emacs stays responsive on large batches."
+Re-encodes at `transmute-compress-quality' and preserves the source
+metadata (the dimensions/orientation tags are refreshed).  No resizing
+is performed — pixel dimensions are preserved.  Processes files
+sequentially so Emacs stays responsive on large batches."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'image)))
     (transmute-do-batch-async targets
@@ -812,7 +834,11 @@ Positive values rotate clockwise, negative counter-clockwise."
              (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) "-trimmed." (cdr (assoc 'extension parsed)))))
         (if (<= end-time trim-start)
             (message "Error: Trim amount exceeds duration for %s" file)
-          (transmute-convert-video file dst "-ss" (number-to-string trim-start) "-t" (number-to-string end-time) "-c" "copy"))))))
+          ;; -t takes a *duration*, not an end timestamp: the clip must be
+          ;; (end-time - trim-start) seconds long to stop at end-time.
+          (transmute-convert-video file dst "-ss" (number-to-string trim-start)
+                                   "-t" (number-to-string (- end-time trim-start))
+                                   "-c" "copy"))))))
 
 ;;;###autoload
 (defun transmute-picture-upscale ()
@@ -1062,7 +1088,13 @@ Saves to ~/Pictures/YYYYMMDDHH/."
       (transmute-do-batch targets
         (let* ((filename (file-name-nondirectory file))
                (dst (expand-file-name filename dest-dir)))
-          (transmute-convert-image-copy file dst "-auto-orient" "-strip" "-quality" "50%" "-resize" "1920x>" "-resize" "x1920>"))))))
+          ;; nil => don't copy tags from the source, so the emailed copy
+          ;; really is stripped of EXIF/GPS metadata.
+          (transmute--convert-image-copy
+           file dst
+           (list "-auto-orient" "-strip" "-quality" "50%"
+                 "-resize" "1920x>" "-resize" "x1920>")
+           nil))))))
 
 ;;;###autoload
 (defun transmute-picture-from-pdf ()
@@ -1088,7 +1120,10 @@ Saves to ~/Pictures/YYYYMMDDHH/."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'image)))
     (transmute-do-batch targets
-      (let* ((cmd (format "exiftool -overwrite_original -orientation#=1 %s && magick %s -auto-orient -strip %s"
+      ;; Bake any EXIF orientation into the pixels *before* clearing the
+      ;; tag; doing it the other way round makes -auto-orient a no-op and
+      ;; silently leaves the image rotated.
+      (let* ((cmd (format "magick %s -auto-orient -strip %s && exiftool -overwrite_original -orientation#=1 %s"
                           (shell-quote-argument file)
                           (shell-quote-argument file)
                           (shell-quote-argument file)))
@@ -1305,7 +1340,7 @@ Runs asynchronously so Emacs stays responsive during batch processing."
                                                   (format "%s/%s.%s" basedir new-base ext)))
                                       (final-name new-name)
                                       (counter 1))
-                                 (while (file-exists-p final-name)
+                                 (while (transmute--name-collides-p final-name file)
                                    (setq final-name (if tags-raw
                                                         (format "%s/%s%d__%s.%s" basedir new-base counter tags-raw ext)
                                                       (format "%s/%s%d.%s" basedir new-base counter ext)))
@@ -1321,7 +1356,7 @@ Runs asynchronously so Emacs stays responsive during batch processing."
                  (progn
                    (transmute--log "Writing %s to CreateDate and DateTimeOriginal for %s" prop file)
                    (transmute--run-async
-                    (format "exiftool -P -all= -overwrite_original_in_place \"-CreateDate<%s\" \"-DateTimeOriginal<%s\" %s"
+                    (format "exiftool -P -overwrite_original_in_place \"-CreateDate<%s\" \"-DateTimeOriginal<%s\" %s"
                             prop prop (shell-quote-argument file))
                     (lambda (_code) (funcall finish))))
                (funcall finish)))))))))
@@ -1413,7 +1448,7 @@ Runs asynchronously so Emacs stays responsive during batch processing."
                  (new-name (format "%s/%s__%s.%s" basedir new-base formatted-tags ext))
                  (final-name new-name)
                  (counter 1))
-            (while (file-exists-p final-name)
+            (while (transmute--name-collides-p final-name file)
               (setq final-name (format "%s/%s%d__%s.%s" basedir new-base counter formatted-tags ext))
               (cl-incf counter))
             (let ((abs-final (expand-file-name final-name basedir))
@@ -1467,7 +1502,7 @@ their original form."
                           (new-name (format "%s/%s__%s.%s" basedir new-base formatted-tags ext))
                           (final-name new-name)
                           (counter 1))
-                     (while (file-exists-p final-name)
+                     (while (transmute--name-collides-p final-name file)
                        (setq final-name (format "%s/%s%d__%s.%s" basedir new-base counter formatted-tags ext))
                        (cl-incf counter))
                      (let ((abs-final (expand-file-name final-name basedir))
@@ -1560,24 +1595,42 @@ once the whole batch has finished."
                       (sidecars (transmute--get-sidecar-files file)))
                  (unless (file-directory-p dest-dir)
                    (make-directory dest-dir t))
-                 ;; Update rename record for main file
-                 (let ((abs-orig (expand-file-name file))
-                       (abs-new (expand-file-name new-main)))
-                   (unless (string= abs-orig abs-new)
-                     (transmute--log "[MOVE] %s -> %s" (file-name-nondirectory abs-orig)
-                                     (concat year-month "/" (file-name-nondirectory abs-new)))
-                     (setq transmute--last-renames (cons (cons abs-orig abs-new) transmute--last-renames))
-                     (transmute--rename-file-safe abs-orig abs-new t))
-                   ;; Move sidecars
-                   (dolist (s sidecars)
-                     (let* ((s-abs (expand-file-name s))
-                            (new-s (expand-file-name (file-name-nondirectory s) dest-dir))
-                            (new-s-abs (expand-file-name new-s)))
-                       (unless (string= s-abs new-s-abs)
-                         (transmute--log "[SIDE] %s -> %s" (file-name-nondirectory s-abs)
-                                         (concat year-month "/" (file-name-nondirectory new-s-abs)))
-                         (setq transmute--last-renames (cons (cons s-abs new-s-abs) transmute--last-renames))
-                         (transmute--rename-file-safe s-abs new-s-abs t)))))))
+                  ;; Move the main file first, refusing to overwrite an
+                  ;; existing file of the same name.  Sidecars only move
+                  ;; when the main file moved (or was already in place).
+                  (let* ((abs-orig (expand-file-name file))
+                         (abs-new (expand-file-name new-main))
+                         (same (string= abs-orig abs-new))
+                         (moved (or same (not (file-exists-p abs-new)))))
+                    (cond
+                     (same nil)
+                     (moved
+                      (transmute--log "[MOVE] %s -> %s"
+                                      (file-name-nondirectory abs-orig)
+                                      (concat year-month "/" (file-name-nondirectory abs-new)))
+                      (setq transmute--last-renames
+                            (cons (cons abs-orig abs-new) transmute--last-renames))
+                      (transmute--rename-file-safe abs-orig abs-new))
+                     (t
+                      (transmute--log "[WARN] Not moving %s: %s already exists"
+                                      (file-name-nondirectory abs-orig)
+                                      (concat year-month "/" (file-name-nondirectory abs-new)))))
+                    (when moved
+                      (dolist (s sidecars)
+                        (let* ((s-abs (expand-file-name s))
+                               (new-s (expand-file-name (file-name-nondirectory s) dest-dir))
+                               (new-s-abs (expand-file-name new-s)))
+                          (unless (string= s-abs new-s-abs)
+                            (if (file-exists-p new-s-abs)
+                                (transmute--log "[WARN] Not moving sidecar %s: %s already exists"
+                                                (file-name-nondirectory s-abs)
+                                                (concat year-month "/" (file-name-nondirectory new-s-abs)))
+                              (transmute--log "[SIDE] %s -> %s"
+                                              (file-name-nondirectory s-abs)
+                                              (concat year-month "/" (file-name-nondirectory new-s-abs)))
+                              (setq transmute--last-renames
+                                    (cons (cons s-abs new-s-abs) transmute--last-renames))
+                              (transmute--rename-file-safe s-abs new-s-abs)))))))))
            (funcall done)))))))
 
 ;;;###autoload
@@ -2102,31 +2155,46 @@ so the kill proceeds without prompting.  Always returns t to allow the kill."
     (set-buffer-modified-p nil))
   t)
 
+(defun transmute--stale-lock-p (lock)
+  "Return non-nil when LOCK is an orphaned Emacs file-lock symlink.
+A lock is orphaned when its `user@host.pid:boot' target belongs to the
+current user and host but the recorded PID is no longer running.  A
+lock we cannot positively identify as dead is never reported stale."
+  (when-let ((target (file-symlink-p lock)))
+    (let ((user-pattern (format "%s@%s" (user-login-name) (system-name))))
+      (when (string-match
+             (concat "\\`" (regexp-quote user-pattern) "\\.\\([0-9]+\\):")
+             target)
+        (let ((pid (string-to-number (match-string 1 target))))
+          (and (> pid 0)
+               (fboundp 'process-attributes)
+               (null (process-attributes pid))))))))
+
 (defun transmute--clean-orphaned-locks (files &optional directory)
   "Delete orphaned Emacs file-lock symlinks for FILES or DIRECTORY.
-If DIRECTORY is provided, scan it for all orphaned media locks
-matching the current user's PID pattern."
-  (let ((user-pattern (format "%s@%s" (user-login-name) (system-name))))
-    (if directory
-        (let ((lock-files (directory-files directory t "\\`\\.#" t))
-              (media-exts (append transmute-image-extensions 
-                                  transmute-video-extensions 
-                                  transmute-audio-extensions)))
-          (dolist (lock lock-files)
-            (let* ((base (substring (file-name-nondirectory lock) 2))
-                   (ext (file-name-extension base)))
-              (when (and (member (downcase (or ext "")) media-exts)
-                         (let ((target (file-symlink-p lock)))
-                           (and target (string-prefix-p user-pattern target))))
-                (delete-file lock)))))
-      ;; Individual files mode
-      (dolist (f files)
-        (let* ((f (expand-file-name f))
-               (dir (file-name-directory f))
-               (base (file-name-nondirectory f))
-               (lock (expand-file-name (concat ".#" base) dir)))
-          (when (file-symlink-p lock)
-            (delete-file lock)))))))
+Only locks owned by the current user and host whose process is gone
+are deleted; live locks, including those held by this Emacs session,
+are left alone.  If DIRECTORY is provided, scan it for all orphaned
+media locks."
+  (if directory
+      (let ((lock-files (directory-files directory t "\\`\\.#" t))
+            (media-exts (append transmute-image-extensions
+                                transmute-video-extensions
+                                transmute-audio-extensions)))
+        (dolist (lock lock-files)
+          (let* ((base (substring (file-name-nondirectory lock) 2))
+                 (ext (file-name-extension base)))
+            (when (and (member (downcase (or ext "")) media-exts)
+                       (transmute--stale-lock-p lock))
+              (delete-file lock)))))
+    ;; Individual files mode
+    (dolist (f files)
+      (let* ((f (expand-file-name f))
+             (dir (file-name-directory f))
+             (base (file-name-nondirectory f))
+             (lock (expand-file-name (concat ".#" base) dir)))
+        (when (transmute--stale-lock-p lock)
+          (delete-file lock))))))
 
 (defun transmute-refresh-thumbnail ()
   "Refresh dired and thumbnail buffers after a transmute batch operation.
