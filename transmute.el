@@ -14,6 +14,7 @@
 
 (require 'cl-lib)
 (require 'dired)
+(require 'subr-x)
 (require 'transient)
 (require 'ucs-normalize)
 
@@ -53,6 +54,26 @@ macro itself, is responsible for counting the task as completed.")
 
 (defvar transmute--inhibit-display-refresh-once nil
   "Internal flag to skip image display refresh once.")
+
+(defvar transmute--skip-refresh-once nil
+  "Internal flag to skip the post-batch refresh once.
+Set by read-only batches (the duplicate scan) where no file changed and
+refreshing thumbnail buffers would only bury the result buffer.")
+
+(defvar transmute--duplicate-signatures nil
+  "Hash table of pixel signature to files for the current duplicate scan.")
+
+(defvar transmute--duplicate-targets nil
+  "Files included in the current duplicate scan.")
+
+(defvar transmute--duplicate-queue nil
+  "Image files still awaiting a signature process in a duplicate scan.")
+
+(defvar transmute--duplicate-inflight 0
+  "Number of signature processes currently running in a duplicate scan.")
+
+(defvar transmute--duplicate-finished nil
+  "Non-nil once the current duplicate scan has produced its report.")
 
 (defvar transmute-after-batch-hook nil
   "Hook run after each transmute batch operation completes.
@@ -177,7 +198,10 @@ appended in order, so Emacs stays responsive on large selections."
           (interrupt-process proc)))
       (setq transmute-active-processes nil
             transmute-total-tasks 0
-            transmute-completed-tasks 0)
+            transmute-completed-tasks 0
+            ;; Do not let a stopped duplicate scan start the files that
+            ;; are still queued; in-flight callbacks will finish it.
+            transmute--duplicate-queue nil)
       (transmute--update-progress-display)
       (transmute--log "[ABORT] Stopped %d active conversions." count)
       (message "Stopped %d active conversions." count))))
@@ -260,6 +284,15 @@ Expressed as a percentage string (e.g. \"85%\" or \"50%\").  Lower
 values produce smaller files at the cost of visible artefacts.
 85%% is typically visually indistinguishable from the source."
   :type 'string
+  :group 'transmute)
+
+(defcustom transmute-duplicate-parallelism 4
+  "Maximum number of image signature processes run at once.
+`transmute-picture-find-duplicates' decodes every selected image to
+compute a pixel signature; starting one process per file can exhaust
+memory and freeze the machine when hundreds of images are selected.
+Raise this on a machine with cores and RAM to spare."
+  :type 'integer
   :group 'transmute)
 
 (defvar transmute-image-extensions
@@ -434,10 +467,13 @@ A numeric suffix is added before the extension on collision."
       (cl-incf counter))
     candidate))
 
-(defun transmute--run-command-async (name cmd &optional callback)
+(defun transmute--run-command-async (name cmd &optional callback quiet)
   "Run CMD string asynchronously as NAME.
-Optional CALLBACK is called with (PROCESS EXIT-STATUS) after completion."
-  (transmute--log "[START] %s: %s" name cmd)
+Optional CALLBACK is called with (PROCESS EXIT-STATUS) after completion.
+When QUIET is non-nil only failures are logged, keeping the log readable
+for bulk jobs that start one process per file."
+  (unless quiet
+    (transmute--log "[START] %s: %s" name cmd))
   (let ((log-buf (get-buffer-create transmute-log-buffer-name)))
     (unless (get-buffer-window log-buf)
       (display-buffer log-buf)))
@@ -455,7 +491,8 @@ Optional CALLBACK is called with (PROCESS EXIT-STATUS) after completion."
            (setq transmute-active-processes (delq proc transmute-active-processes))
            (setq transmute-completed-tasks (1+ transmute-completed-tasks))
            (if (zerop exit-code)
-               (transmute--log "[SUCCESS] %s" proc-name)
+               (unless quiet
+                 (transmute--log "[SUCCESS] %s" proc-name))
              (transmute--log "[FAILED] %s (exit code %d)" proc-name exit-code)
              (message "Transmute task FAILED: %s" proc-name)
              (when (buffer-live-p proc-buf)
@@ -1850,6 +1887,248 @@ once the whole batch has finished."
                               (transmute--rename-file-safe s-abs new-s-abs)))))))))
            (funcall done)))))))
 
+;;; Duplicate Detection
+
+(defvar transmute-duplicates-buffer-name "*transmute-duplicates*"
+  "Name of the buffer showing duplicate image reports.")
+
+(defvar-local transmute-duplicates--groups nil
+  "Duplicate file groups shown in the current report buffer.")
+
+(defvar-local transmute-duplicates--targets nil
+  "Files rescanned by `transmute-duplicates-rescan' in the report buffer.")
+
+(define-derived-mode transmute-duplicates-mode special-mode "Transmute-Duplicates"
+  "Major mode for reviewing duplicate images.
+\\<transmute-duplicates-mode-map>
+\\[transmute-picture-trash-duplicates] trashes every duplicate,
+keeping the largest file of each group.  Files are compared by their
+ImageMagick pixel signature, so copies that differ only in metadata
+or container format still match."
+  (setq-local truncate-lines t))
+
+(define-key transmute-duplicates-mode-map (kbd "x") #'transmute-picture-trash-duplicates)
+(define-key transmute-duplicates-mode-map (kbd "d") #'transmute-picture-trash-duplicates)
+(define-key transmute-duplicates-mode-map (kbd "g") #'transmute-duplicates-rescan)
+
+(defun transmute--file-size (file)
+  "Return the size of FILE in bytes, or 0 when it cannot be determined."
+  (or (file-attribute-size (file-attributes file)) 0))
+
+(defun transmute--duplicate-groups ()
+  "Return duplicate groups collected by the last scan.
+Each group lists its largest file first; groups are ordered by keeper."
+  (let (groups)
+    (maphash
+     (lambda (_signature files)
+       (when (cdr files)
+         (push (sort (copy-sequence files)
+                     (lambda (a b)
+                       (let ((size-a (transmute--file-size a))
+                             (size-b (transmute--file-size b)))
+                         (if (= size-a size-b)
+                             (string< a b)
+                           (> size-a size-b)))))
+               groups)))
+     transmute--duplicate-signatures)
+    (sort groups (lambda (a b) (string< (car a) (car b))))))
+
+(defun transmute--render-duplicate-report (groups)
+  "Insert a report for duplicate GROUPS into the current buffer."
+  (let ((dupes (cl-loop for group in groups sum (1- (length group)))))
+    (insert (format "Duplicate Images: %d group%s, %d duplicate%s\n"
+                    (length groups) (if (= (length groups) 1) "" "s")
+                    dupes (if (= dupes 1) "" "s")))
+    (insert (substitute-command-keys
+             "Press \\[transmute-picture-trash-duplicates] to trash duplicates (keeping the largest), \\[transmute-duplicates-rescan] to rescan, \\[quit-window] to bury.\n\n"))
+    (cl-loop for group in groups
+             for index from 1 do
+             (insert (format "Group %d -- %d files\n" index (length group)))
+             (dolist (file group)
+               (insert (format "  %s %8s  %s\n"
+                               (if (string= file (car group)) "[KEEP]" "[DUPE]")
+                               (file-size-human-readable (transmute--file-size file))
+                               file)))
+             (insert "\n"))))
+
+(defun transmute--show-duplicate-report ()
+  "Show the duplicate groups collected by the current scan."
+  (setq transmute--duplicate-queue nil
+        transmute--duplicate-inflight 0)
+  (let ((groups (transmute--duplicate-groups)))
+    (if (null groups)
+        (progn
+          (transmute--log "[DONE] No duplicate images found.")
+          (message "No duplicate images found.")
+          ;; Drop any stale report from a previous scan.
+          (when-let ((buf (get-buffer transmute-duplicates-buffer-name)))
+            (when-let ((win (get-buffer-window buf)))
+              (quit-window nil win))
+            (kill-buffer buf)))
+      (let ((buf (get-buffer-create transmute-duplicates-buffer-name))
+            (dupes (cl-loop for group in groups sum (1- (length group)))))
+        (transmute--log "[DONE] Found %d duplicate group(s), %d duplicate file(s)."
+                        (length groups) dupes)
+        (with-current-buffer buf
+          (transmute-duplicates-mode)
+          (setq-local transmute-duplicates--groups groups
+                      transmute-duplicates--targets transmute--duplicate-targets)
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (transmute--render-duplicate-report groups)
+            (goto-char (point-min))))
+        ;; Pop to the report so it cannot be missed: the selection is
+        ;; returned to it and the post-scan refresh is skipped, so no
+        ;; other buffer can bury it.
+        (pop-to-buffer buf)))))
+
+(defun transmute--duplicate-maybe-finish ()
+  "Show the duplicate report once no scan work is left."
+  (when (and (null transmute--duplicate-queue)
+             (zerop transmute--duplicate-inflight)
+             (not transmute--duplicate-finished))
+    (setq transmute--duplicate-finished t)
+    ;; A read-only scan must not trigger the thumbnail refresh: it can
+    ;; regenerate every selected thumbnail and re-display the current
+    ;; image, burying the report.  Only do this when the scan is the
+    ;; last batch running, otherwise the refresh belongs to that batch.
+    (when (null transmute-active-processes)
+      (setq transmute--skip-refresh-once t))
+    (transmute--show-duplicate-report)))
+
+(defun transmute--duplicate-collect (abs-file tmp exit-code)
+  "Record the signature computed into TMP for ABS-FILE.
+EXIT-CODE is the `magick' process exit status; TMP is always deleted."
+  (unwind-protect
+      (when (and (file-exists-p tmp) (zerop exit-code))
+        (let ((signature (with-temp-buffer
+                           (insert-file-contents tmp)
+                           (string-trim (buffer-string)))))
+          (unless (string-empty-p signature)
+            (puthash signature
+                     (cons abs-file
+                           (gethash signature transmute--duplicate-signatures))
+                     transmute--duplicate-signatures))))
+    (transmute--delete-temp tmp)))
+
+(defun transmute--duplicate-start-next ()
+  "Start a signature process for the next queued file, if there is one."
+  (when-let ((file (pop transmute--duplicate-queue)))
+    (let* ((abs-file (expand-file-name file))
+           (tmp (make-temp-file "transmute-sig-"))
+           (name (concat "sig: " (file-name-nondirectory file)))
+           (cmd (format "magick identify -quiet -format '%%#' %s > %s"
+                        (shell-quote-argument abs-file)
+                        (shell-quote-argument tmp))))
+      (condition-case err
+          (progn
+            (transmute--run-command-async
+             name cmd
+             (lambda (proc exit-code)
+               ;; A sentinel may run more than once for the same
+               ;; process; make the bookkeeping idempotent so the
+               ;; in-flight count cannot underflow.
+               (unless (process-get proc 'transmute-duplicate-collected)
+                 (process-put proc 'transmute-duplicate-collected t)
+                 (unwind-protect
+                     (transmute--duplicate-collect abs-file tmp exit-code)
+                   (setq transmute--duplicate-inflight
+                         (1- transmute--duplicate-inflight))
+                   (transmute--duplicate-start-next)
+                   (transmute--duplicate-maybe-finish))))
+             t)
+            (setq transmute--duplicate-inflight
+                  (1+ transmute--duplicate-inflight)))
+        (error
+         ;; The process never started (e.g. out of file descriptors).
+         ;; Count the file as done and move on instead of leaving the
+         ;; scan stuck forever.
+         (transmute--log "[FAILED] %s: %s" name (error-message-string err))
+         (transmute--delete-temp tmp)
+         (setq transmute-completed-tasks (1+ transmute-completed-tasks))
+         (transmute--update-progress-display)
+         (transmute--duplicate-start-next)
+         (transmute--duplicate-maybe-finish))))))
+
+(defun transmute--scan-duplicates (targets)
+  "Asynchronously compute image signatures for TARGETS and report duplicates.
+At most `transmute-duplicate-parallelism' `magick' processes run at a
+time.  Signature computation decodes every pixel, so starting one
+process per file can exhaust memory and freeze Emacs on large scans."
+  (when (or transmute--duplicate-queue
+            (> transmute--duplicate-inflight 0))
+    (user-error "A duplicate scan is already running"))
+  (setq transmute--duplicate-signatures (make-hash-table :test 'equal)
+        transmute--duplicate-targets (copy-sequence targets)
+        transmute--duplicate-queue (copy-sequence targets)
+        transmute--duplicate-inflight 0
+        transmute--duplicate-finished nil)
+  (transmute--log "[START] Checking %d image(s) for duplicates..." (length targets))
+  (setq transmute-total-tasks (+ transmute-total-tasks (length targets)))
+  (dotimes (_ (min (max 1 transmute-duplicate-parallelism) (length targets)))
+    (transmute--duplicate-start-next))
+  ;; A scan where no process could be started still has to report.
+  (transmute--duplicate-maybe-finish))
+
+;;;###autoload
+(defun transmute-picture-find-duplicates ()
+  "Find pixel-identical duplicate images among the selected files.
+Images are compared by their ImageMagick pixel signature, so copies
+that differ only in metadata, filename, or container format are still
+reported.  Results appear in a report buffer where duplicates can be
+trashed while keeping the largest file in each group."
+  (interactive)
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (if (< (length targets) 2)
+        (message "Select at least two images to search for duplicates.")
+      (transmute--scan-duplicates targets))))
+
+(defun transmute-duplicates-rescan ()
+  "Rescan the files listed in the current duplicate report."
+  (interactive)
+  (unless (derived-mode-p 'transmute-duplicates-mode)
+    (user-error "Not in a duplicate report buffer"))
+  (if (null transmute-duplicates--targets)
+      (message "No files to rescan.")
+    (transmute--scan-duplicates transmute-duplicates--targets)))
+
+;;;###autoload
+(defun transmute-picture-trash-duplicates ()
+  "Trash the duplicate files in the current report.
+The largest file of each group is kept.  Asks for confirmation before
+trashing anything."
+  (interactive)
+  (unless (derived-mode-p 'transmute-duplicates-mode)
+    (user-error "Run `transmute-picture-find-duplicates' first"))
+  (let ((victims (cl-loop for group in transmute-duplicates--groups
+                          append (cdr group))))
+    (if (null victims)
+        (message "No duplicates to trash.")
+      (when (y-or-n-p (format "Trash %d duplicate file(s), keeping the largest of each group? "
+                              (length victims)))
+        (let ((trashed 0))
+          (transmute-do-batch victims
+            (when (file-exists-p file)
+              (transmute--trash file)
+              (setq trashed (1+ trashed))))
+          (setq transmute-duplicates--groups
+                (cl-loop for group in transmute-duplicates--groups
+                         for remaining = (cl-remove-if-not #'file-exists-p group)
+                         when (cdr remaining) collect remaining))
+          (transmute--log "[TRASH] Removed %d duplicate file(s)." trashed)
+          (if (null transmute-duplicates--groups)
+              (progn
+                (message "Trashed %d duplicate file(s); no duplicates remain." trashed)
+                (when-let ((win (get-buffer-window transmute-duplicates-buffer-name)))
+                  (quit-window nil win))
+                (kill-buffer transmute-duplicates-buffer-name))
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (transmute--render-duplicate-report transmute-duplicates--groups)
+              (goto-char (point-min)))
+            (message "Trashed %d duplicate file(s); %d group(s) remain."
+                     trashed (length transmute-duplicates--groups))))))))
+
 ;;;###autoload
 (defun transmute-normalise-names ()
   "Rename selected files to safe, glob-friendly names.
@@ -2227,6 +2506,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                      ("Picture Info" . transmute-picture-info)
                      ("Picture Montage" . transmute-picture-montage)
                      ("Picture Organise" . transmute-picture-organise)
+                     ("Picture Find Duplicates" . transmute-picture-find-duplicates)
                      ("Normalise Names" . transmute-normalise-names)
                      ("Picture Fix WhatsApp" . transmute-picture-fix-whatsapp)
                      ("Picture Email" . transmute-picture-email)
@@ -2303,6 +2583,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
    ["Organise"
     ("o" "Organise" transmute-picture-organise)
     ("n" "Normalise Names" transmute-normalise-names)
+    ("D" "Find Duplicates" transmute-picture-find-duplicates)
     ("w" "WhatsApp Fix" transmute-picture-fix-whatsapp)
     ("F" "Update from CreateDate" transmute-picture-update-from-create-date)
     ("U" "Update to CreateDate" transmute-picture-update-to-create-date)]
@@ -2445,6 +2726,20 @@ media locks."
           (delete-file lock))))))
 
 (defun transmute-refresh-thumbnail ()
+  "Refresh dired and thumbnail buffers after a transmute batch operation.
+A read-only batch (the duplicate scan) skips the refresh entirely:
+nothing changed on disk, and regenerating thumbnails would be slow and
+would re-display the current image over the report buffer."
+  (if (and transmute--skip-refresh-once (null transmute-batch-files))
+      (progn
+        (setq transmute--skip-refresh-once nil
+              transmute--inhibit-display-refresh-once nil
+              transmute--last-renames nil)
+        (transmute--log "[REFRESH] Skipped (read-only batch)."))
+    (setq transmute--skip-refresh-once nil)
+    (transmute--refresh-thumbnail)))
+
+(defun transmute--refresh-thumbnail ()
   "Refresh dired and thumbnail buffers after a transmute batch operation.
 Handles renamed files by updating their visiting buffers and reverts
 affected buffers silently to prevent file-supersession prompts.
