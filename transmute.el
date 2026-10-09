@@ -932,6 +932,15 @@ Otherwise ask for file."
       (transmute-convert-image file file "-auto-orient" "-strip" "-quality" "50%" "-resize" "1920x>" "-resize" "x1920>"))))
 
 ;;;###autoload
+(defun transmute-picture-resize (width height)
+  "Resize images to exactly WIDTH x HEIGHT, ignoring aspect ratio."
+  (interactive (list (read-number "Width: " 1920)
+                     (read-number "Height: " 1080)))
+  (when-let ((targets (transmute-get-filtered-targets 'image)))
+    (transmute-do-batch targets
+      (transmute-convert-image file file "-auto-orient" "-resize" (format "%dx%d!" width height)))))
+
+;;;###autoload
 (defun transmute-picture-compress ()
   "Compress images in place, keeping resolution.
 Re-encodes at `transmute-compress-quality' and preserves the source
@@ -2488,6 +2497,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
   (let* ((commands '(("Picture Convert" . transmute-picture-convert)
                      ("Picture Crush (640px)" . transmute-picture-crush)
                      ("Picture Scale (1920px)" . transmute-picture-scale)
+                     ("Picture Resize (Exact)" . transmute-picture-resize)
                      ("Picture Compress (lossless)" . transmute-picture-compress)
                      ("Picture Correct (Brighten)" . transmute-picture-correct)
                      ("Picture Auto Colour" . transmute-picture-autocolour)
@@ -2571,6 +2581,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
     ["Enhance"
      ("z" "Crush (640px)" transmute-picture-crush)
      ("s" "Scale (1920px)" transmute-picture-scale)
+     ("E" "Resize (exact)" transmute-picture-resize)
      ("Z" "Compress (lossless)" transmute-picture-compress)
      ("u" "Upscale (GAN)" transmute-picture-upscale)
     ("r" "Rotate Right" transmute-picture-rotate-right)
