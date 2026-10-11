@@ -3,12 +3,14 @@
 ;; Author: James Dyer <james@dyerdwelling.family>
 ;; Keywords: media, image, video, automation
 ;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (transient "0.3.0"))
-;; Version: 0.7.1
+;; Version: 0.7.3
 
 ;;; Commentary:
 ;; This package provides Emacs Lisp implementations for media processing
 ;; (Images, Video, Audio). It relies on external tools: exiftool,
-;; imagemagick (magick), ffmpeg, sox, tesseract, and realesrgan-ncnn-vulkan.
+;; imagemagick (magick), ffmpeg, sox, tesseract, and optionally
+;; realesrgan-ncnn-vulkan or the Upscayl CLI (upscayl-bin) for AI
+;; upscaling.
 
 ;;; Code:
 
@@ -276,6 +278,65 @@ appended in order, so Emacs stays responsive on large selections."
 Set an integer to cap ffmpeg's thread count; a low value helps keep
 the machine responsive when several conversions run in parallel."
   :type '(choice (integer :tag "Threads") (const :tag "Automatic" nil))
+  :group 'transmute)
+
+(defcustom transmute-upscayl-binary nil
+  "Path to the Upscayl CLI used by `transmute-picture-upscale-upscayl'.
+When nil, Transmute auto-detects the first available of the
+`upscayl-bin' command on `exec-path' or the binary bundled with the
+Upscayl AppImage (e.g. /opt/upscayl/resources/bin/upscayl-bin)."
+  :type '(choice (file :tag "Binary") (const :tag "Auto-detect" nil))
+  :group 'transmute)
+
+(defcustom transmute-upscayl-models-dir nil
+  "Folder containing the Upscayl model .param/.bin files.
+When nil, Transmute looks for a models folder next to the detected
+binary (the Upscayl AppImage ships one at resources/models) and in a
+couple of standard locations."
+  :type '(choice (directory :tag "Models folder") (const :tag "Auto-detect" nil))
+  :group 'transmute)
+
+(defcustom transmute-upscayl-model "digital-art-4x"
+  "Default Upscayl model used by `transmute-picture-upscale-upscayl'.
+The interactive command offers every model found in the models
+folder with this value as the default."
+  :type 'string
+  :group 'transmute)
+
+(defcustom transmute-upscayl-edge 7632
+  "Default target for the *short* edge, in pixels, of Upscayl upscales.
+A 7632px short edge covers Redbubble duvets/tapestries (6480x7632)
+and photographic prints XL (6096x9144) in either orientation.  The
+interactive command lets you override this per run.  0 means no
+resize: keep the model's native scale (usually 4x)."
+  :type 'integer
+  :group 'transmute)
+
+(defcustom transmute-upscayl-format "jpg"
+  "Output format used by `transmute-picture-upscale-upscayl'.
+The upscaled file gets the same base name as its source with this
+extension."
+  :type '(choice (const :tag "JPEG (jpg)" "jpg")
+                 (const :tag "PNG (png)" "png")
+                 (const :tag "WebP (webp)" "webp"))
+  :group 'transmute)
+
+(defcustom transmute-upscayl-compression 0
+  "Output compression (0-100) for `transmute-picture-upscale-upscayl'.
+0 keeps the best quality; higher values shrink the file."
+  :type 'integer
+  :group 'transmute)
+
+(defcustom transmute-upscayl-gpu nil
+  "GPU id passed to upscayl-bin, or nil to let it choose automatically."
+  :type '(choice (integer :tag "GPU id") (const :tag "Automatic" nil))
+  :group 'transmute)
+
+(defcustom transmute-upscayl-tile nil
+  "Tile size passed to upscayl-bin, or nil for automatic tiling.
+Lower tile sizes reduce VRAM use for large images; the CLI requires
+a minimum of 32."
+  :type '(choice (integer :tag "Tile size") (const :tag "Automatic" nil))
   :group 'transmute)
 
 (defcustom transmute-compress-quality "85%"
@@ -841,6 +902,107 @@ Preserves metadata and moves SRC to trash."
        (when (and trash-fallback (zerop exit-code))
          (move-file-to-trash trash-fallback))))))
 
+;;; Upscayl Integration
+
+(defun transmute--upscayl-binary ()
+  "Return the upscayl-bin executable to use, or nil if none is found.
+Honors `transmute-upscayl-binary'.  When nil, auto-detects.  The
+result is always an absolute file name so the spawned shell does not
+need to resolve the binary via its own PATH, which may differ from
+`exec-path' and would otherwise cause a shell \"command not found\"
+(exit 127)."
+  (let ((names (if transmute-upscayl-binary
+                   (list transmute-upscayl-binary)
+                 '("upscayl-bin")))
+        (paths '("/opt/upscayl/resources/bin/upscayl-bin"
+                 "/usr/local/bin/upscayl-bin"
+                 "/usr/lib/upscayl/bin/upscayl-bin")))
+    (or (cl-some (lambda (name)
+                   (cond ((string-match-p "\\`/" name)
+                          (when (file-executable-p name) name))
+                         ((executable-find name))))
+                 names)
+        (cl-some (lambda (path) (when (file-executable-p path) path)) paths))))
+
+(defun transmute--upscayl-models-dir ()
+  "Return the folder holding Upscayl models, or nil when not found.
+Honors `transmute-upscayl-models-dir'.  When nil, prefers a models
+folder next to the detected binary (the Upscayl AppImage ships one
+at resources/models), then the common system-wide locations."
+  (or (when transmute-upscayl-models-dir
+        (let ((dir (expand-file-name transmute-upscayl-models-dir)))
+          (when (file-directory-p dir) dir)))
+      (when-let* ((binary (transmute--upscayl-binary)))
+        (let ((dir (expand-file-name "../models" (file-name-directory binary))))
+          (when (file-directory-p dir) dir)))
+      (cl-some (lambda (dir)
+                 (when (file-directory-p dir) (expand-file-name dir)))
+               '("~/.config/upscayl/models"
+                 "/opt/upscayl/resources/models"))))
+
+(defun transmute--upscayl-models ()
+  "Return the sorted names of Upscayl models found on disk."
+  (when-let* ((dir (transmute--upscayl-models-dir)))
+    (sort (mapcar (lambda (file)
+                    (file-name-sans-extension (file-name-nondirectory file)))
+                  (directory-files dir t "\\.param\\'"))
+          #'string<)))
+
+(defun transmute--upscayl-target-width (width height edge)
+  "Return the output width putting the short edge of WIDTH x HEIGHT at EDGE.
+Returns nil when EDGE is nil or 0, meaning the model's native scale
+is kept.  upscayl-bin only accepts a target width, so landscape and
+square images are scaled so their short edge (the height) reaches
+EDGE, while portrait images keep EDGE as their width."
+  (when (and edge (> edge 0))
+    (if (>= width height)
+        (ceiling (* edge width) height)
+      edge)))
+
+(defun transmute--image-dimensions (file)
+  "Return (WIDTH HEIGHT) for FILE, or nil when they cannot be read."
+  (let ((dims (string-trim
+               (shell-command-to-string
+                (format "magick identify -format \"%%w %%h\" %s"
+                        (shell-quote-argument (expand-file-name file)))))))
+    (when (string-match "\\`\\([0-9]+\\)[ \t]+\\([0-9]+\\)\\'" dims)
+      (list (string-to-number (match-string 1 dims))
+            (string-to-number (match-string 2 dims))))))
+
+(defun transmute-convert-upscayl (src dst &rest upscayl-args)
+  "Upscale image SRC to DST using upscayl-bin and UPSCAYL-ARGS.
+UPSCAYL-ARGS are extra CLI arguments (model, models folder, format,
+compression, width, GPU, tile).  Preserves metadata and moves SRC to
+trash.  Signals a user error when no upscayl-bin executable exists."
+  (let ((binary (transmute--upscayl-binary)))
+    (unless binary
+      (user-error "upscayl-bin not found; install the Upscayl AppImage or set `transmute-upscayl-binary'"))
+    (let* ((src (expand-file-name src))
+           (dst (expand-file-name dst))
+           (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
+           (upscayl-cmd (mapconcat #'shell-quote-argument
+                                   (append (list binary) upscayl-args
+                                           (list "-i" src "-o" tmp)) " "))
+           (exif-cmd (transmute--exif-cmd src tmp))
+           (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
+           (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
+           (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
+           (trash-cmd (unless (string= src dst)
+                        (if (executable-find transmute-trash-command)
+                            (format "%s %s" transmute-trash-command (shell-quote-argument src))
+                          nil)))
+           (trash-fallback (unless (string= src dst)
+                             (unless (executable-find transmute-trash-command)
+                               src)))
+           (xattr-cmd (transmute--processed-xattr-cmd dst))
+           (full-cmd (mapconcat #'identity (delq nil (list upscayl-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
+      (transmute--run-command-async
+       (file-name-nondirectory src) full-cmd
+       (lambda (_proc exit-code)
+         (transmute--delete-temp tmp)
+         (when (and trash-fallback (zerop exit-code))
+           (move-file-to-trash trash-fallback)))))))
+
 ;;; Batch / Dired Integration
 
 (defun transmute--image-dired-display-file ()
@@ -1062,13 +1224,77 @@ Positive values rotate clockwise, negative counter-clockwise."
 
 ;;;###autoload
 (defun transmute-picture-upscale ()
-  "Upscale images using realesrgan-x4plus."
+  "Upscale images using realesrgan-x4plus.
+Requires the `realesrgan-ncnn-vulkan' executable.  Use
+`transmute-picture-upscale-upscayl' for upscaling through the
+Upscayl CLI instead."
   (interactive)
+  (unless (executable-find "realesrgan-ncnn-vulkan")
+    (user-error "realesrgan-ncnn-vulkan not found; install it or use `transmute-picture-upscale-upscayl' (upscayl-bin)"))
   (when-let ((targets (transmute-get-filtered-targets 'image)))
     (transmute-do-batch targets
       (let* ((parsed (transmute--parse-filename file))
              (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".jpg")))
         (transmute-convert-gan file dst "-n" "realesrgan-x4plus" "-j" "8:8:8" "-f" "jpg")))))
+
+;;;###autoload
+(defun transmute-picture-upscale-upscayl (model edge format)
+  "Upscale images through the Upscayl CLI (upscayl-bin).
+MODEL is an Upscayl model name, chosen from the .param files in the
+models folder (e.g. digital-art-4x).  EDGE is the target size of the
+image's short edge in pixels; 0 keeps the model's native scale
+(usually 4x).  FORMAT is the output format: jpg, png or webp.  Each
+upscaled file gets the same base name as its source with the new
+extension; the source is moved to the trash once the upscale
+succeeds.  Compression, GPU and tile size come from the
+`transmute-upscayl-*' options.  Landscape and square images are
+resized via upscayl-bin's -w argument so the short edge reaches
+EDGE, mirroring the `upscale_art.sh' pipeline.  Input files must be
+readable by upscayl-bin (jpg, png or webp)."
+  (interactive
+   (progn
+     (unless (transmute--upscayl-binary)
+       (user-error "upscayl-bin not found; install the Upscayl AppImage or set `transmute-upscayl-binary'"))
+     (unless (transmute--upscayl-models-dir)
+       (user-error "No Upscayl models folder found; set `transmute-upscayl-models-dir'"))
+     (list (let ((models (transmute--upscayl-models)))
+             (if models
+                 (completing-read "Upscayl model: " models nil t nil nil
+                                  transmute-upscayl-model)
+               (read-string "Upscayl model: " transmute-upscayl-model)))
+           (read-number "Target short edge in px (0 = native model scale): "
+                        transmute-upscayl-edge)
+           (completing-read "Output format: " '("jpg" "png" "webp")
+                            nil t nil nil transmute-upscayl-format))))
+  (let ((binary (transmute--upscayl-binary))
+        (models-dir (transmute--upscayl-models-dir)))
+    (unless binary
+      (user-error "upscayl-bin not found; install the Upscayl AppImage or set `transmute-upscayl-binary'"))
+    (unless models-dir
+      (user-error "No Upscayl models folder found; set `transmute-upscayl-models-dir'"))
+    (when-let* ((targets (transmute-get-filtered-targets 'image)))
+      (transmute-do-batch targets
+        (let* ((parsed (transmute--parse-filename file))
+               (dst (concat (cdr (assoc 'directory parsed))
+                            (cdr (assoc 'no-ext parsed)) "." format))
+               (resize (> edge 0))
+               (dims (when resize (transmute--image-dimensions file)))
+               (target-width (when dims
+                               (transmute--upscayl-target-width
+                                (car dims) (cadr dims) edge)))
+               (args (append (list "-n" model "-m" models-dir
+                                   "-f" format
+                                   "-c" (number-to-string transmute-upscayl-compression))
+                             (when target-width
+                               (list "-w" (number-to-string target-width)))
+                             (when transmute-upscayl-gpu
+                               (list "-g" (number-to-string transmute-upscayl-gpu)))
+                             (when (and transmute-upscayl-tile (> transmute-upscayl-tile 0))
+                               (list "-t" (number-to-string transmute-upscayl-tile))))))
+          (when (and resize (null dims))
+            (transmute--log "[WARN] %s: could not read image dimensions; using native model scale"
+                            (file-name-nondirectory file)))
+          (apply #'transmute-convert-upscayl file dst args))))))
 
 ;;;###autoload
 (defun transmute-picture-get-text ()
@@ -2504,6 +2730,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
                      ("Picture Crop" . transmute-picture-crop)
                      ("Picture Rotate by Degrees" . transmute-picture-rotate)
                      ("Picture Upscale (GAN)" . transmute-picture-upscale)
+                     ("Picture Upscale (Upscayl)" . transmute-picture-upscale-upscayl)
                      ("Picture Get Text (OCR)" . transmute-picture-get-text)
                      ("Picture To PDF" . transmute-picture-to-pdf)
                      ("Picture Tag (Interactive)" . transmute-tag-interactive)
@@ -2584,6 +2811,7 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
      ("E" "Resize (exact)" transmute-picture-resize)
      ("Z" "Compress (lossless)" transmute-picture-compress)
      ("u" "Upscale (GAN)" transmute-picture-upscale)
+     ("y" "Upscale (Upscayl)" transmute-picture-upscale-upscayl)
     ("r" "Rotate Right" transmute-picture-rotate-right)
     ("l" "Rotate Left" transmute-picture-rotate-left)
     ("R" "Rotate by Degrees..." transmute-picture-rotate)]

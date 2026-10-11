@@ -9,7 +9,7 @@ Designed for Dired users, Transmute allows you to batch process images, videos, 
 
 * Features
 
-- *Images:* Convert, resize (crush/scale), upscale (GAN), rotate, brighten, auto-colour, crop, OCR (text extraction), convert to PDF, extract from PDF, montage creation, date-based organisation, WhatsApp filename fix, orientation reset, horizontal split, and Org capture gallery export.
+- *Images:* Convert, resize (crush/scale), upscale (GAN or Upscayl), rotate, brighten, auto-colour, crop, OCR (text extraction), convert to PDF, extract from PDF, montage creation, date-based organisation, WhatsApp filename fix, orientation reset, horizontal split, and Org capture gallery export.
 - *Video:* Convert (H.264/AAC), shrink, rescale, rotate (R/L/CCW), reverse, speed up/slow down, trim (top/tail), cut, extract audio, remove/replace audio, background music injection (random library with fade-out), concatenate, double length, extract frames, from frames sequence, GIF conversion, and glitch/flip removal.
 - *Audio:* Convert to MP3, normalise volume, and trim silence.
 - *Documents:* Convert to PDF (LibreOffice headless; .docx, .doc, .odt, .rtf, .wpd).
@@ -31,6 +31,7 @@ Transmute relies on the following tools being installed in your system path:
 - =tesseract= (OCR/Text extraction)
 - =pdftoppm= (from =poppler-utils=, for PDF image extraction)
 - =realesrgan-ncnn-vulkan= (Optional: for AI upscaling)
+- =upscayl-bin= (Optional: the Upscayl CLI, bundled with the Upscayl AppImage, for AI upscaling; auto-detected at =/opt/upscayl/resources/bin/upscayl-bin=)
 - =soffice= (from =libreoffice= / =libreoffice-fresh=, for document to PDF conversion)
 - =trash-put= (Optional: for safe file deletion; falls back to Emacs' =move-file-to-trash= when unavailable, e.g. on Windows)
 
@@ -76,9 +77,9 @@ Utilities:   m  L  S
        c Convert      d From PDF        z Crush (640px)  b Brighten    o Organise          e Email
        C Crop         i Info            s Scale (1920px) a Auto Colour w WhatsApp Fix      g To Capture
        S Split        x Show Backup ... u Upscale (GAN)  O Orientation F Update from CD
-       m Montage      X Set Xattr       r Rotate Right                 U Update to CD
-       p To PDF                         l Rotate Left
-       t Get Text (OCR)
+       m Montage      X Set Xattr       y Upscale (Upscayl)            U Update to CD
+       p To PDF                         r Rotate Right
+       t Get Text (OCR)                 l Rotate Left
 #+end_example
 
 =Video= (=v=) -- 5 columns, 5 rows:

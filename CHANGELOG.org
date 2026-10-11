@@ -11,6 +11,16 @@ project's main git repository.
 
 * Versions
 
+** <<2026-10-10 Sat>> *0.7.3*
+
+Upscayl upscaling -- New command that drives the Upscayl CLI, a native Elisp port of the =upscale_art.sh= pipeline, plus a clear error when the GAN binary is missing.
+
+*** Features
+
+- *Upscayl upscaling* -- Added `transmute-picture-upscale-upscayl` (Image menu =y=, plus a completing-read menu entry), which upscales the selected images with `upscayl-bin`. The command prompts for an Upscayl model (read from the `.param` files in the models folder, default `digital-art-4x`), the target *short* edge in pixels (default 7632; 0 keeps the model's native scale), and the output format (jpg/png/webp). Landscape and square images are resized through upscayl's `-w` argument so their short edge reaches the requested size, mirroring `~/bin/upscale_art.sh`. Files are staged in a temporary file first, EXIF metadata and modification time are preserved, and the source is moved to the trash only after a successful upscale.
+- *Upscayl options* -- New options `transmute-upscayl-binary` (nil = auto-detect `upscayl-bin` on `exec-path`, falling back to the Upscayl AppImage path at =/opt/upscayl/resources/bin/upscayl-bin=), `transmute-upscayl-models-dir` (nil = auto-detect, preferring a `models` folder next to the binary), `transmute-upscayl-model`, `transmute-upscayl-edge`, `transmute-upscayl-format`, `transmute-upscayl-compression`, `transmute-upscayl-gpu` and `transmute-upscayl-tile`.
+- *Clear GAN error* -- `transmute-picture-upscale` now checks for the `realesrgan-ncnn-vulkan` executable up front and signals a user error pointing at the Upscayl command, instead of queueing tasks that fail with a shell exit 127 when the binary is not installed.
+
 ** <<2026-09-10 Thu>> *0.7.2*
 
 Reliability fixes -- corrected several cases where conversions failed
