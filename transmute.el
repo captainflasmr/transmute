@@ -280,6 +280,39 @@ the machine responsive when several conversions run in parallel."
   :type '(choice (integer :tag "Threads") (const :tag "Automatic" nil))
   :group 'transmute)
 
+(defcustom transmute-gif-width 1366
+  "Width in pixels of GIFs produced by `transmute-video-to-gif'.
+The height is scaled proportionally.  Set to nil to keep the
+source resolution."
+  :type '(choice (integer :tag "Width") (const :tag "Source size" nil))
+  :group 'transmute)
+
+(defcustom transmute-gif-fps 4
+  "Frame rate of GIFs produced by `transmute-video-to-gif'.
+Set to nil to keep the source frame rate."
+  :type '(choice (number :tag "Frames per second") (const :tag "Source rate" nil))
+  :group 'transmute)
+
+(defcustom transmute-gif-dither "none"
+  "Dithering used by `transmute-video-to-gif'.
+`none' gives the crispest flat colours and text, and suits screen
+recordings.  The error-diffusion methods (`sierra2_4a',
+`floyd_steinberg') avoid banding in gradients and photographs, at
+the cost of a noisier, larger GIF; `bayer' uses a regular ordered
+pattern."
+  :type '(choice (const :tag "None (crispest text)" "none")
+                 (const :tag "Sierra 2-4A" "sierra2_4a")
+                 (const :tag "Floyd-Steinberg" "floyd_steinberg")
+                 (const :tag "Bayer" "bayer"))
+  :group 'transmute)
+
+(defcustom transmute-gif-colours 64
+  "Maximum number of colours in GIFs produced by `transmute-video-to-gif'.
+Screen recordings often look fine with 64-128 colours, which also
+keeps the file smaller."
+  :type '(integer :tag "Colours (2-256)")
+  :group 'transmute)
+
 (defcustom transmute-upscayl-binary nil
   "Path to the Upscayl CLI used by `transmute-picture-upscale-upscayl'.
 When nil, Transmute auto-detects the first available of the
@@ -874,6 +907,65 @@ Preserves metadata."
     (transmute--run-command-async (file-name-nondirectory src) full-cmd
                                   (lambda (_proc _code)
                                     (transmute--delete-temp tmp)))))
+
+(defun transmute--gif-filter ()
+  "Return the ffmpeg filter chain shared by both GIF conversion passes."
+  (mapconcat #'identity
+             (delq nil
+                   (list (when (and transmute-gif-fps (> transmute-gif-fps 0))
+                           (format "fps=%s" transmute-gif-fps))
+                         (when (and transmute-gif-width (> transmute-gif-width 0))
+                           (format "scale=%d:-1:flags=lanczos"
+                                   transmute-gif-width))))
+             ","))
+
+(defun transmute--convert-video-to-gif (src dst)
+  "Convert video SRC to GIF DST using a two-pass palette.
+A single-pass GIF encode uses ffmpeg's generic palette, which
+darkens the image and dithers flat areas into speckles.  Generating
+a palette from the video first keeps the original colours and makes
+text and flat backgrounds much cleaner.  Preserves the source's
+modification time."
+  (let* ((src (expand-file-name src))
+         (dst (expand-file-name dst))
+         (tmp (make-temp-file "transmute-" nil ".gif"))
+         (palette (make-temp-file "transmute-palette-" nil ".png"))
+         (base (or (transmute--gif-filter) "null"))
+         (threads (when transmute-ffmpeg-threads
+                    (list "-threads" (number-to-string transmute-ffmpeg-threads))))
+         (palette-cmd
+          (mapconcat #'shell-quote-argument
+                     (append (list "ffmpeg" "-hide_banner" "-loglevel" "warning"
+                                   "-stats" "-y" "-i" src)
+                             threads
+                             (list "-vf"
+                                   (format "%s,palettegen=stats_mode=diff:max_colors=%d"
+                                           base (max 2 (min 256 transmute-gif-colours)))
+                                   "-frames:v" "1" palette))
+                     " "))
+         (encode-cmd
+          (mapconcat #'shell-quote-argument
+                     (append (list "ffmpeg" "-hide_banner" "-loglevel" "warning"
+                                   "-stats" "-y" "-i" src "-i" palette)
+                             threads
+                             (list "-lavfi"
+                                   (concat base " [x]; [x][1:v] paletteuse=dither="
+                                           transmute-gif-dither ":diff_mode=rectangle")
+                                   "-loop" "0" tmp))
+                     " "))
+         (touch-cmd (format "touch -r %s %s"
+                            (shell-quote-argument src) (shell-quote-argument tmp)))
+         (cp-cmd (format "cp -p %s %s"
+                         (shell-quote-argument tmp) (shell-quote-argument dst)))
+         (rm-tmp (format "rm %s %s"
+                         (shell-quote-argument tmp) (shell-quote-argument palette)))
+         (full-cmd (mapconcat #'identity
+                              (list palette-cmd encode-cmd touch-cmd cp-cmd rm-tmp)
+                              " && ")))
+    (transmute--run-command-async (file-name-nondirectory src) full-cmd
+                                  (lambda (_proc _code)
+                                    (transmute--delete-temp tmp)
+                                    (transmute--delete-temp palette)))))
 
 (defun transmute-convert-gan (src dst &rest gan-args)
   "Upscale image SRC to DST using realesrgan-ncnn-vulkan with GAN-ARGS.
@@ -1890,7 +1982,7 @@ Runs asynchronously so Emacs stays responsive during batch processing."
     (transmute-do-batch targets
       (let* ((parsed (transmute--parse-filename file))
              (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".gif")))
-        (transmute-convert-video file dst "-vf" "fps=20,scale=800:-1:flags=lanczos" "-loop" "0")))))
+        (transmute--convert-video-to-gif file dst)))))
 
 ;;;###autoload
 (defun transmute-picture-update-from-create-date ()
