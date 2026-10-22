@@ -82,15 +82,15 @@ Utilities:   m  L  S
        t Get Text (OCR)                 l Rotate Left
 #+end_example
 
-=Video= (=v=) -- 5 columns, 5 rows:
+=Video= (=v=) -- 6 columns, 5 rows:
 
 #+begin_example
- Video: Convert          Trim                 Effects            Sequence          Audio
-       c Convert        C Rotate CCW        g To GIF           j Concat          a Extract Audio
-       s Shrink         r Reverse           + Speed Up         2 Double          x Remove Audio
-       e Rescale        t Top/Tail (Trim)   - Slow Down        E Extract Frames  m Replace Audio
-       R Rotate Right   k Cut               f Remove Flips     I From Frames     B Background Music
-       L Rotate Left                        F Set FPS
+ Video: Convert         Trim               Effects         Sequence          Audio               Meta
+       c Convert       C Rotate CCW       g To GIF        j Concat          a Extract Audio     i Info
+       s Shrink        r Reverse          + Speed Up      2 Double          x Remove Audio
+       e Rescale       t Top/Tail (Trim)  - Slow Down     E Extract Frames  m Replace Audio
+       R Rotate Right  k Cut              f Remove Flips  I From Frames     B Background Music
+       L Rotate Left                      F Set FPS
 #+end_example
 
 =Audio= (=a=) -- 1 column, 5 rows:

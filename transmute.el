@@ -2950,7 +2950,9 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
     ("a" "Extract Audio" transmute-video-extract-audio)
     ("x" "Remove Audio" transmute-video-remove-audio)
     ("m" "Replace Audio" transmute-video-replace-audio)
-    ("B" "Background Music" transmute-video-background-music)]])
+    ("B" "Background Music" transmute-video-background-music)]
+   ["Meta"
+    ("i" "Info" transmute-video-info)]])
 
 (transient-define-prefix transmute-audio-menu ()
   ["Audio"
