@@ -24,6 +24,7 @@ Upscayl upscaling -- New command that drives the Upscayl CLI, a native Elisp por
 *** Bugfixes
 
 - *Upscayl detection on Arch* -- `transmute--upscayl-binary` now also finds the CLI where the Arch =upscayl-bin= package installs it (=/usr/share/upscayl/bin/upscayl-bin=, also reachable as =/usr/bin/upscayl-ncnn=), and `transmute--upscayl-models-dir` falls back to =/usr/share/upscayl/models=. Previously both were only detected in the AppImage layout, so =y= failed with "upscayl-bin not found" even though Upscayl was installed.
+- *Sequential GPU batches* -- `transmute-picture-upscale-upscayl` and `transmute-picture-upscale` now queue files with `transmute-do-batch-async` and start each upscale from the previous process's sentinel. A marked batch no longer launches one Vulkan job per file, which exhausted shared GPU memory on integrated graphics. Both commands share `transmute--upscale-command` (pipeline construction) and `transmute--upscale-finished` (staging-file cleanup and trash fallback); `transmute-convert-upscayl` and `transmute-convert-gan` remain asynchronous and registered with the progress display for direct callers.
 
 ** <<2026-09-10 Thu>> *0.7.2*
 

@@ -969,32 +969,67 @@ modification time."
                                     (transmute--delete-temp tmp)
                                     (transmute--delete-temp palette)))))
 
-(defun transmute-convert-gan (src dst &rest gan-args)
-  "Upscale image SRC to DST using realesrgan-ncnn-vulkan with GAN-ARGS.
-Preserves metadata and moves SRC to trash."
+(defun transmute--upscale-command (tool-args src dst)
+  "Return a plist describing how to upscale SRC to DST with TOOL-ARGS.
+TOOL-ARGS is a list whose first element is the executable and whose
+remaining elements are its command-line arguments.  The pipeline runs
+the tool, copies metadata and the modification time, moves the result
+into place, deletes the staging file, trashes SRC and sets the
+processed xattr.
+
+The plist holds:
+  :command         the full shell pipeline
+  :tmp             the staging file, for `transmute--delete-temp'
+  :trash-fallback  SRC when `transmute-trash-command' is unavailable,
+                   so the caller can use `move-file-to-trash' instead"
   (let* ((src (expand-file-name src))
          (dst (expand-file-name dst))
          (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
-         (gan-cmd (mapconcat #'shell-quote-argument (append (list "realesrgan-ncnn-vulkan") gan-args (list "-i" src "-o" tmp)) " "))
+         (tool-cmd (mapconcat #'shell-quote-argument
+                              (append tool-args (list "-i" src "-o" tmp)) " "))
          (exif-cmd (transmute--exif-cmd src tmp))
          (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
          (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
          (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-         (trash-cmd (unless (string= src dst)
-                      (if (executable-find transmute-trash-command)
-                          (format "%s %s" transmute-trash-command (shell-quote-argument src))
-                        nil)))
-         (trash-fallback (unless (string= src dst)
-                           (unless (executable-find transmute-trash-command)
-                             src)))
-         (xattr-cmd (transmute--processed-xattr-cmd dst))
-         (full-cmd (mapconcat #'identity (delq nil (list gan-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
+         (same-file (string= src dst))
+         (trash-ok (executable-find transmute-trash-command))
+         (trash-cmd (unless same-file
+                      (when trash-ok
+                        (format "%s %s" transmute-trash-command (shell-quote-argument src)))))
+         (xattr-cmd (transmute--processed-xattr-cmd dst)))
+    (list :command (mapconcat #'identity
+                              (delq nil (list tool-cmd exif-cmd touch-cmd
+                                              cp-cmd rm-tmp trash-cmd xattr-cmd))
+                              " && ")
+          :tmp tmp
+          :trash-fallback (unless (or same-file trash-ok) src))))
+
+(defun transmute--upscale-finished (spec exit-code)
+  "Finish an upscale described by SPEC that exited with EXIT-CODE.
+Deletes the staging file and, when the pipeline succeeded and
+`transmute-trash-command' was unavailable, moves the source file to
+the trash.  Never signals, so sequential batches always advance."
+  (transmute--delete-temp (plist-get spec :tmp))
+  (when (and (zerop exit-code) (plist-get spec :trash-fallback))
+    (condition-case err
+        (move-file-to-trash (plist-get spec :trash-fallback))
+      (error
+       (transmute--log "[WARN] Could not trash %s: %s"
+                       (plist-get spec :trash-fallback)
+                       (error-message-string err))))))
+
+(defun transmute-convert-gan (src dst &rest gan-args)
+  "Upscale image SRC to DST using realesrgan-ncnn-vulkan with GAN-ARGS.
+Preserves metadata and moves SRC to trash.  The work runs in an
+asynchronous process; `transmute-picture-upscale' runs one file at a
+time through this function."
+  (let ((spec (transmute--upscale-command
+               (cons "realesrgan-ncnn-vulkan" gan-args) src dst)))
     (transmute--run-command-async
-     (file-name-nondirectory src) full-cmd
+     (file-name-nondirectory (expand-file-name src))
+     (plist-get spec :command)
      (lambda (_proc exit-code)
-       (transmute--delete-temp tmp)
-       (when (and trash-fallback (zerop exit-code))
-         (move-file-to-trash trash-fallback))))))
+       (transmute--upscale-finished spec exit-code)))))
 
 ;;; Upscayl Integration
 
@@ -1069,35 +1104,20 @@ EDGE, while portrait images keep EDGE as their width."
   "Upscale image SRC to DST using upscayl-bin and UPSCAYL-ARGS.
 UPSCAYL-ARGS are extra CLI arguments (model, models folder, format,
 compression, width, GPU, tile).  Preserves metadata and moves SRC to
-trash.  Signals a user error when no upscayl-bin executable exists."
+trash.  Signals a user error when no upscayl-bin executable exists.
+The work runs in an asynchronous process;
+`transmute-picture-upscale-upscayl' runs one file at a time through
+this function."
   (let ((binary (transmute--upscayl-binary)))
     (unless binary
       (user-error "upscayl-bin not found; install the Upscayl AppImage or set `transmute-upscayl-binary'"))
-    (let* ((src (expand-file-name src))
-           (dst (expand-file-name dst))
-           (tmp (make-temp-file "transmute-" nil (concat "." (file-name-extension dst))))
-           (upscayl-cmd (mapconcat #'shell-quote-argument
-                                   (append (list binary) upscayl-args
-                                           (list "-i" src "-o" tmp)) " "))
-           (exif-cmd (transmute--exif-cmd src tmp))
-           (touch-cmd (format "touch -r %s %s" (shell-quote-argument src) (shell-quote-argument tmp)))
-           (cp-cmd (format "cp -p %s %s" (shell-quote-argument tmp) (shell-quote-argument dst)))
-           (rm-tmp (format "rm %s" (shell-quote-argument tmp)))
-           (trash-cmd (unless (string= src dst)
-                        (if (executable-find transmute-trash-command)
-                            (format "%s %s" transmute-trash-command (shell-quote-argument src))
-                          nil)))
-           (trash-fallback (unless (string= src dst)
-                             (unless (executable-find transmute-trash-command)
-                               src)))
-           (xattr-cmd (transmute--processed-xattr-cmd dst))
-           (full-cmd (mapconcat #'identity (delq nil (list upscayl-cmd exif-cmd touch-cmd cp-cmd rm-tmp trash-cmd xattr-cmd)) " && ")))
+    (let ((spec (transmute--upscale-command
+                 (append (list binary) upscayl-args) src dst)))
       (transmute--run-command-async
-       (file-name-nondirectory src) full-cmd
+       (file-name-nondirectory (expand-file-name src))
+       (plist-get spec :command)
        (lambda (_proc exit-code)
-         (transmute--delete-temp tmp)
-         (when (and trash-fallback (zerop exit-code))
-           (move-file-to-trash trash-fallback)))))))
+         (transmute--upscale-finished spec exit-code))))))
 
 ;;; Batch / Dired Integration
 
@@ -1321,17 +1341,24 @@ Positive values rotate clockwise, negative counter-clockwise."
 ;;;###autoload
 (defun transmute-picture-upscale ()
   "Upscale images using realesrgan-x4plus.
-Requires the `realesrgan-ncnn-vulkan' executable.  Use
+Requires the `realesrgan-ncnn-vulkan' executable.  Files are processed
+one at a time so a batch does not start one GPU job per file.  Use
 `transmute-picture-upscale-upscayl' for upscaling through the
 Upscayl CLI instead."
   (interactive)
   (unless (executable-find "realesrgan-ncnn-vulkan")
     (user-error "realesrgan-ncnn-vulkan not found; install it or use `transmute-picture-upscale-upscayl' (upscayl-bin)"))
   (when-let ((targets (transmute-get-filtered-targets 'image)))
-    (transmute-do-batch targets
+    (transmute-do-batch-async targets
       (let* ((parsed (transmute--parse-filename file))
-             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".jpg")))
-        (transmute-convert-gan file dst "-n" "realesrgan-x4plus" "-j" "8:8:8" "-f" "jpg")))))
+             (dst (concat (cdr (assoc 'directory parsed)) (cdr (assoc 'no-ext parsed)) ".jpg"))
+             (spec (transmute--upscale-command
+                    '("realesrgan-ncnn-vulkan" "-n" "realesrgan-x4plus" "-j" "8:8:8" "-f" "jpg")
+                    file dst)))
+        (transmute--run-async (plist-get spec :command)
+          (lambda (code)
+            (transmute--upscale-finished spec code)
+            (funcall done)))))))
 
 ;;;###autoload
 (defun transmute-picture-upscale-upscayl (model edge format)
@@ -1342,7 +1369,9 @@ image's short edge in pixels; 0 keeps the model's native scale
 (usually 4x).  FORMAT is the output format: jpg, png or webp.  Each
 upscaled file gets the same base name as its source with the new
 extension; the source is moved to the trash once the upscale
-succeeds.  Compression, GPU and tile size come from the
+succeeds.  Files are processed one at a time, asynchronously, so a
+batch never starts one GPU job per file and Emacs stays responsive.
+Compression, GPU and tile size come from the
 `transmute-upscayl-*' options.  Landscape and square images are
 resized via upscayl-bin's -w argument so the short edge reaches
 EDGE, mirroring the `upscale_art.sh' pipeline.  Input files must be
@@ -1369,7 +1398,7 @@ readable by upscayl-bin (jpg, png or webp)."
     (unless models-dir
       (user-error "No Upscayl models folder found; set `transmute-upscayl-models-dir'"))
     (when-let* ((targets (transmute-get-filtered-targets 'image)))
-      (transmute-do-batch targets
+      (transmute-do-batch-async targets
         (let* ((parsed (transmute--parse-filename file))
                (dst (concat (cdr (assoc 'directory parsed))
                             (cdr (assoc 'no-ext parsed)) "." format))
@@ -1378,7 +1407,7 @@ readable by upscayl-bin (jpg, png or webp)."
                (target-width (when dims
                                (transmute--upscayl-target-width
                                 (car dims) (cadr dims) edge)))
-               (args (append (list "-n" model "-m" models-dir
+               (args (append (list binary "-n" model "-m" models-dir
                                    "-f" format
                                    "-c" (number-to-string transmute-upscayl-compression))
                              (when target-width
@@ -1386,11 +1415,15 @@ readable by upscayl-bin (jpg, png or webp)."
                              (when transmute-upscayl-gpu
                                (list "-g" (number-to-string transmute-upscayl-gpu)))
                              (when (and transmute-upscayl-tile (> transmute-upscayl-tile 0))
-                               (list "-t" (number-to-string transmute-upscayl-tile))))))
+                               (list "-t" (number-to-string transmute-upscayl-tile)))))
+               (spec (transmute--upscale-command args file dst)))
           (when (and resize (null dims))
             (transmute--log "[WARN] %s: could not read image dimensions; using native model scale"
                             (file-name-nondirectory file)))
-          (apply #'transmute-convert-upscayl file dst args))))))
+          (transmute--run-async (plist-get spec :command)
+            (lambda (code)
+              (transmute--upscale-finished spec code)
+              (funcall done))))))))
 
 ;;;###autoload
 (defun transmute-picture-get-text ()
