@@ -316,8 +316,10 @@ keeps the file smaller."
 (defcustom transmute-upscayl-binary nil
   "Path to the Upscayl CLI used by `transmute-picture-upscale-upscayl'.
 When nil, Transmute auto-detects the first available of the
-`upscayl-bin' command on `exec-path' or the binary bundled with the
-Upscayl AppImage (e.g. /opt/upscayl/resources/bin/upscayl-bin)."
+`upscayl-bin' command on `exec-path' or a binary bundled with an
+Upscayl installation (e.g. the AppImage's
+/opt/upscayl/resources/bin/upscayl-bin, or the Arch package's
+/usr/share/upscayl/bin/upscayl-bin)."
   :type '(choice (file :tag "Binary") (const :tag "Auto-detect" nil))
   :group 'transmute)
 
@@ -1005,10 +1007,11 @@ need to resolve the binary via its own PATH, which may differ from
 (exit 127)."
   (let ((names (if transmute-upscayl-binary
                    (list transmute-upscayl-binary)
-                 '("upscayl-bin")))
+                 '("upscayl-bin" "upscayl-ncnn")))
         (paths '("/opt/upscayl/resources/bin/upscayl-bin"
                  "/usr/local/bin/upscayl-bin"
-                 "/usr/lib/upscayl/bin/upscayl-bin")))
+                 "/usr/lib/upscayl/bin/upscayl-bin"
+                 "/usr/share/upscayl/bin/upscayl-bin")))
     (or (cl-some (lambda (name)
                    (cond ((string-match-p "\\`/" name)
                           (when (file-executable-p name) name))
@@ -1030,7 +1033,8 @@ at resources/models), then the common system-wide locations."
       (cl-some (lambda (dir)
                  (when (file-directory-p dir) (expand-file-name dir)))
                '("~/.config/upscayl/models"
-                 "/opt/upscayl/resources/models"))))
+                 "/opt/upscayl/resources/models"
+                 "/usr/share/upscayl/models"))))
 
 (defun transmute--upscayl-models ()
   "Return the sorted names of Upscayl models found on disk."

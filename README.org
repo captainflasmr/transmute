@@ -31,7 +31,7 @@ Transmute relies on the following tools being installed in your system path:
 - =tesseract= (OCR/Text extraction)
 - =pdftoppm= (from =poppler-utils=, for PDF image extraction)
 - =realesrgan-ncnn-vulkan= (Optional: for AI upscaling)
-- =upscayl-bin= (Optional: the Upscayl CLI, bundled with the Upscayl AppImage, for AI upscaling; auto-detected at =/opt/upscayl/resources/bin/upscayl-bin=)
+- =upscayl-bin= (Optional: the Upscayl CLI, bundled with the Upscayl AppImage or the Arch =upscayl-bin= package, for AI upscaling; auto-detected at =/opt/upscayl/resources/bin/upscayl-bin= or =/usr/share/upscayl/bin/upscayl-bin=)
 - =soffice= (from =libreoffice= / =libreoffice-fresh=, for document to PDF conversion)
 - =trash-put= (Optional: for safe file deletion; falls back to Emacs' =move-file-to-trash= when unavailable, e.g. on Windows)
 

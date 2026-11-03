@@ -21,6 +21,10 @@ Upscayl upscaling -- New command that drives the Upscayl CLI, a native Elisp por
 - *Upscayl options* -- New options `transmute-upscayl-binary` (nil = auto-detect `upscayl-bin` on `exec-path`, falling back to the Upscayl AppImage path at =/opt/upscayl/resources/bin/upscayl-bin=), `transmute-upscayl-models-dir` (nil = auto-detect, preferring a `models` folder next to the binary), `transmute-upscayl-model`, `transmute-upscayl-edge`, `transmute-upscayl-format`, `transmute-upscayl-compression`, `transmute-upscayl-gpu` and `transmute-upscayl-tile`.
 - *Clear GAN error* -- `transmute-picture-upscale` now checks for the `realesrgan-ncnn-vulkan` executable up front and signals a user error pointing at the Upscayl command, instead of queueing tasks that fail with a shell exit 127 when the binary is not installed.
 
+*** Bugfixes
+
+- *Upscayl detection on Arch* -- `transmute--upscayl-binary` now also finds the CLI where the Arch =upscayl-bin= package installs it (=/usr/share/upscayl/bin/upscayl-bin=, also reachable as =/usr/bin/upscayl-ncnn=), and `transmute--upscayl-models-dir` falls back to =/usr/share/upscayl/models=. Previously both were only detected in the AppImage layout, so =y= failed with "upscayl-bin not found" even though Upscayl was installed.
+
 ** <<2026-09-10 Thu>> *0.7.2*
 
 Reliability fixes -- corrected several cases where conversions failed
