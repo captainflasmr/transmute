@@ -185,10 +185,25 @@ appended in order, so Emacs stays responsive on large selections."
     (pop-to-buffer buf)
     (funcall next)))
 
+(defun transmute--log-buffer ()
+  "Return the transmute log buffer, ready for output.
+The buffer uses `compilation-mode' and wraps long lines at word
+boundaries."
+  (let ((buf (get-buffer-create transmute-log-buffer-name)))
+    (with-current-buffer buf
+      (unless (eq major-mode 'compilation-mode)
+        (compilation-mode))
+      (unless visual-line-mode
+        (visual-line-mode 1)))
+    buf))
+
 (defun transmute-show-log ()
-  "Show the transmute log buffer."
+  "Show the transmute log buffer at its newest output."
   (interactive)
-  (pop-to-buffer (get-buffer-create transmute-log-buffer-name)))
+  (let ((buf (transmute--log-buffer)))
+    (pop-to-buffer buf)
+    (goto-char (point-max))
+    (recenter -1)))
 
 (defun transmute-stop-conversions ()
   "Stop all currently active transmute conversions."
@@ -209,15 +224,16 @@ appended in order, so Emacs stays responsive on large selections."
       (message "Stopped %d active conversions." count))))
 
 (defun transmute--log (msg &rest args)
-  "Log MSG with ARGS to the transmute log buffer."
-  (let ((buf (get-buffer-create transmute-log-buffer-name))
+  "Log MSG with ARGS to the transmute log buffer.
+Point is kept at the end of the buffer, and every window displaying it
+is scrolled to the newest output so the log follows along as it grows."
+  (let ((buf (transmute--log-buffer))
         (inhibit-read-only t))
     (with-current-buffer buf
-      (unless (eq major-mode 'compilation-mode)
-        (compilation-mode))
-      (save-excursion
-        (goto-char (point-max))
-        (insert (apply #'format msg args) "\n")))))
+      (goto-char (point-max))
+      (insert (apply #'format msg args) "\n")
+      (dolist (win (get-buffer-window-list buf nil t))
+        (set-window-point win (point-max))))))
 
 (defun transmute-header-line-format ()
   "Return the header line format for transmute progress."
@@ -570,7 +586,7 @@ When QUIET is non-nil only failures are logged, keeping the log readable
 for bulk jobs that start one process per file."
   (unless quiet
     (transmute--log "[START] %s: %s" name cmd))
-  (let ((log-buf (get-buffer-create transmute-log-buffer-name)))
+  (let ((log-buf (transmute--log-buffer)))
     (unless (get-buffer-window log-buf)
       (display-buffer log-buf)))
   (setq transmute--task-registered t)
@@ -2181,7 +2197,7 @@ once the whole batch has finished."
   (interactive)
   (when-let ((targets (transmute-get-targets)))
     ;; Pop to log buffer so user sees progress
-    (let ((buf (get-buffer-create transmute-log-buffer-name)))
+    (let ((buf (transmute--log-buffer)))
       (pop-to-buffer buf)
       (transmute--log "[START] Organizing %d files..." (length targets)))
     (setq transmute--inhibit-display-refresh-once t)
@@ -2194,7 +2210,7 @@ once the whole batch has finished."
               (remove-hook 'transmute-after-batch-hook finalize)
               (when (fboundp 'dired-image-thumbnail-hide-display)
                 (dired-image-thumbnail-hide-display))
-              (pop-to-buffer (get-buffer-create transmute-log-buffer-name))))
+              (pop-to-buffer (transmute--log-buffer))))
       (add-hook 'transmute-after-batch-hook finalize t))
     (transmute-do-batch-async targets
       (transmute-get-date-async
@@ -2552,7 +2568,7 @@ appended.  Files whose names are already clean are left untouched."
 Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
   (interactive)
   (when-let ((targets (transmute-get-filtered-targets 'image)))
-    (let ((buf (get-buffer-create transmute-log-buffer-name)))
+    (let ((buf (transmute--log-buffer)))
       (display-buffer buf)
       (transmute--log "[START] Fixing WhatsApp for %d files..." (length targets)))
     (transmute-do-batch-parallel targets
