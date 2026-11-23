@@ -103,14 +103,13 @@ Utilities:   m  L  S
        I Video Info
 #+end_example
 
-=Tags= (=t=) -- 2 columns, 4 rows:
+=Tags= (=t=) -- 2 columns, 3 rows:
 
 #+begin_example
  Tags:          Clean:
-     t Tag (Interactive)  d Retag by Date
+     t Add Tags & Rename  d Retag by Date
      k Tag from List      c Clear Tags
-     r Add Tags & Rename  i Tag Info
-     R Rename from Tags
+     R Rename from Tags   i Tag Info
 #+end_example
 
 =Document= (=d=) -- 1 column, 1 row:
@@ -120,6 +119,11 @@ Utilities:   m  L  S
 #+end_example
 
 Press =q= or =C-g= at any sub-transient to return to the main menu.
+
+If images were tagged by an older version, their metadata may contain
+one tag path per list line (e.g. =people/kate family/evie=).  Run
+=M-x transmute-picture-repair-tags= on the affected files to split
+those paths into the intended tags.
 
 ** Monitoring Progress
 - Check the top of your windows for the progress bar: =[Transmuting: 5/10 (50%)]=

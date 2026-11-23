@@ -1654,10 +1654,11 @@ Images are resized to temporary files to avoid modifying originals."
 ;;;###autoload
 (defun transmute-tag-interactive (tags)
   "Interactively tag selected media files.
-TAGS is a comma-separated string or list of tags."
+TAGS is a comma-separated string or list of tags; whitespace inside an
+element separates multiple tags."
   (interactive (list (completing-read-multiple "Tags (comma separated): " nil)))
   (when-let ((targets (transmute-get-filtered-targets 'any)))
-    (let* ((tag-list (if (stringp tags) (split-string tags "," t) tags))
+    (let* ((tag-list (transmute--split-tag-selection tags))
            (tag-str (mapconcat #'identity tag-list ","))
            (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
            (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
@@ -1903,14 +1904,111 @@ sanitised."
       ;; Accept CRLF files (e.g. edited on Windows) as well as LF.
       (split-string (buffer-string) "\r\n\\|\n" t))))
 
+(defun transmute--split-tag-selection (tags)
+  "Return the individual tags selected in TAGS.
+TAGS is a string or a list of strings.  Lines in
+`transmute-tag-list-file' hold several space-separated tags, so each
+element is split on whitespace; commas also separate tags.  Input
+order is preserved and duplicates are removed."
+  (delete-dups
+   (mapcan (lambda (item)
+             (split-string item "[[:space:],]+" t))
+           (if (stringp tags) (list tags) tags))))
+
+(defun transmute--tag-metadata-strings (tag-list)
+  "Return (TAGS HIERARCHICAL KEYWORDS) metadata strings for TAG-LIST.
+TAGS is the comma-separated list written to TagsList and
+LastKeywordXMP, HIERARCHICAL is the same list with | separators for
+HierarchicalSubject, and KEYWORDS is the sorted flat keyword list."
+  (let* ((paths (delete-dups
+                 (mapcar (lambda (tag)
+                           (replace-regexp-in-string "@" "/" (string-trim tag)))
+                         tag-list)))
+         (keywords (delete-dups
+                    (sort (mapcan (lambda (path)
+                                    (split-string
+                                     (replace-regexp-in-string "/" " " path)
+                                     "[[:space:]]+" t))
+                                  paths)
+                          #'string<))))
+    (list (mapconcat #'identity paths ",")
+          (mapconcat (lambda (path)
+                       (replace-regexp-in-string "/" "|" path))
+                     paths ",")
+          (mapconcat #'identity keywords ","))))
+
+(defun transmute--tag-write-command (file tag-list)
+  "Return an exiftool command writing all tag fields for TAG-LIST to FILE."
+  (pcase-let ((`(,tags ,hier ,keywords)
+               (transmute--tag-metadata-strings tag-list)))
+    (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s %s"
+            (shell-quote-argument (format "-TagsList=%s" tags))
+            (shell-quote-argument (format "-XMP-microsoft:LastKeywordXMP=%s" tags))
+            (shell-quote-argument (format "-HierarchicalSubject=%s" hier))
+            (shell-quote-argument (format "-XPKeywords=%s" keywords))
+            (shell-quote-argument (format "-Subject=%s" keywords))
+            (shell-quote-argument (format "-Keywords=%s" keywords))
+            (shell-quote-argument (expand-file-name file)))))
+
+(defun transmute--read-tag-items (file)
+  "Return FILE's tag paths from TagsList, or HierarchicalSubject as fallback."
+  (let* ((read-tag (lambda (tag)
+                     (string-trim
+                      (shell-command-to-string
+                       (format "exiftool -s3 -%s %s" tag
+                               (shell-quote-argument (expand-file-name file)))))))
+         (raw (funcall read-tag "TagsList")))
+    (when (or (string-empty-p raw) (string-prefix-p "Warning" raw))
+      (setq raw (replace-regexp-in-string
+                 "|" "/" (funcall read-tag "XMP-lr:HierarchicalSubject"))))
+    (unless (or (string-empty-p raw) (string-prefix-p "Warning" raw))
+      (mapcar #'string-trim (split-string raw "," t)))))
+
+;;;###autoload
+(defun transmute-picture-repair-tags (&optional files)
+  "Repair space-joined tag paths in FILES, or in the selected files.
+Older versions wrote each line of `transmute-tag-list-file' as a single
+tag path, so \"people@kate family@evie\" became
+\"people/kate family/evie\".  This splits such paths into the intended
+tags and rewrites the tag metadata.  Files whose tag lists are already
+normalised are skipped."
+  (interactive)
+  (let ((targets (or files (transmute-get-filtered-targets 'any))))
+    (transmute-do-batch-async targets
+      (let* ((items (transmute--read-tag-items file))
+             (malformed (cl-some (lambda (item)
+                                   (string-match-p "[[:space:]]" item))
+                                 items))
+             (tags (and items
+                        (delete-dups
+                         (mapcan (lambda (item)
+                                   (split-string item "[[:space:]]+" t))
+                                 items)))))
+        (cond
+         ((null items)
+          (transmute--log "[SKIP] %s (no tag list)" file)
+          (funcall done))
+         ((not malformed)
+          (transmute--log "[SKIP] %s (tags already normalised)" file)
+          (funcall done))
+         (t
+          (transmute--log "[REPAIR] %s <- %s" file
+                          (mapconcat #'identity tags ","))
+          (transmute--run-async
+           (transmute--tag-write-command file tags)
+           (lambda (exit-code)
+             (when (zerop exit-code)
+               (transmute--log "[DONE] %s" file))
+             (funcall done)))))))))
+
 ;;;###autoload
 (defun transmute-tag-from-list (tags)
   "Interactively tag selected media files from a list of known tags.
-TAGS is a comma-separated string or list of tags selected via
-`completing-read-multiple' against the tag list file."
+TAGS is selected via `completing-read-multiple' against the tag list
+file.  Each selected line may contain several space-separated tags."
   (interactive (list (completing-read-multiple "Tags: " (transmute--known-tags))))
   (when-let ((targets (transmute-get-filtered-targets 'any)))
-    (let* ((tag-list (if (stringp tags) (split-string tags "," t) tags))
+    (let* ((tag-list (transmute--split-tag-selection tags))
            (tag-str (mapconcat #'identity tag-list ","))
            (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
            (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
@@ -2093,7 +2191,8 @@ Runs asynchronously so Emacs stays responsive during batch processing."
 ;;;###autoload
 (defun transmute-tag-and-rename (tags)
   "Tag selected media files from known tags, then rename based on tags and date.
-TAGS is selected via `completing-read-multiple' against the tag list file.
+TAGS is selected via `completing-read-multiple' against the tag list
+file; each selected line may contain several space-separated tags.
 After writing metadata, each file is renamed to the
 YYYYMMDDHHMMSS--label__tag1@tag2.ext pattern.
 The filename tag segment is sanitised via `transmute--tags-to-filename'
@@ -2101,7 +2200,7 @@ so spaces become dashes and no spaces appear on disk; EXIF tags keep
 their original form."
   (interactive (list (completing-read-multiple "Tags: " (transmute--known-tags))))
   (when-let ((targets (transmute-get-filtered-targets 'any)))
-    (let* ((tag-list (if (stringp tags) (split-string tags "," t) tags))
+    (let* ((tag-list (transmute--split-tag-selection tags))
            (tag-str (mapconcat #'identity tag-list ","))
            (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
            (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
@@ -3018,9 +3117,8 @@ Renames file to YYYYMMDD120000--IMG-YYYYMMDD-WA... pattern and sets EXIF dates."
 (transient-define-prefix transmute-tag-menu ()
   ["Tags"
    ["Tag"
-    ("t" "Tag (Interactive)" transmute-tag-interactive)
+    ("t" "Add Tags & Rename" transmute-tag-and-rename)
     ("k" "Tag from List" transmute-tag-from-list)
-    ("r" "Add Tags & Rename" transmute-tag-and-rename)
     ("R" "Rename from Tags" transmute-picture-tag-rename)]
    ["Clean"
     ("d" "Retag by Date" transmute-retag-by-date)
