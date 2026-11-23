@@ -16,6 +16,7 @@
 
 (require 'cl-lib)
 (require 'dired)
+(require 'json)
 (require 'subr-x)
 (require 'transient)
 (require 'ucs-normalize)
@@ -1659,20 +1660,10 @@ element separates multiple tags."
   (interactive (list (completing-read-multiple "Tags (comma separated): " nil)))
   (when-let ((targets (transmute-get-filtered-targets 'any)))
     (let* ((tag-list (transmute--split-tag-selection tags))
-           (tag-str (mapconcat #'identity tag-list ","))
-           (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
-           (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
-           (keyword-str (mapconcat #'identity keywords ",")))
+           (tag-str (mapconcat #'identity tag-list ",")))
       (transmute-do-batch-parallel targets
         (transmute--log "[TAG] %s <- %s" file tag-str)
-        (let ((cmd (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s"
-                           (shell-quote-argument (format "-TagsList=%s" hier-tag-str))
-                           (shell-quote-argument (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str))
-                           (shell-quote-argument (format "-HierarchicalSubject=%s"
-                                                         (replace-regexp-in-string "/" "|" hier-tag-str)))
-                           (shell-quote-argument (format "-XPKeywords=%s" keyword-str))
-                           (shell-quote-argument (format "-Subject=%s" keyword-str))
-                           (shell-quote-argument file))))
+        (let ((cmd (transmute--tag-write-command file tag-list)))
           (transmute--run-command-async (file-name-nondirectory file) cmd
                                         (lambda (_proc _exit-code)
                                           (transmute--log "[DONE] %s" file))))))))
@@ -1938,10 +1929,13 @@ HierarchicalSubject, and KEYWORDS is the sorted flat keyword list."
           (mapconcat #'identity keywords ","))))
 
 (defun transmute--tag-write-command (file tag-list)
-  "Return an exiftool command writing all tag fields for TAG-LIST to FILE."
+  "Return an exiftool command writing all tag fields for TAG-LIST to FILE.
+`-sep' is required so exiftool writes one XMP list item per tag instead
+of a single comma-joined item, which digiKam would read as one tag."
   (pcase-let ((`(,tags ,hier ,keywords)
                (transmute--tag-metadata-strings tag-list)))
-    (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s %s"
+    (format "exiftool -P -overwrite_original_in_place -sep %s %s %s %s %s %s %s %s"
+            (shell-quote-argument ",")
             (shell-quote-argument (format "-TagsList=%s" tags))
             (shell-quote-argument (format "-XMP-microsoft:LastKeywordXMP=%s" tags))
             (shell-quote-argument (format "-HierarchicalSubject=%s" hier))
@@ -1950,42 +1944,50 @@ HierarchicalSubject, and KEYWORDS is the sorted flat keyword list."
             (shell-quote-argument (format "-Keywords=%s" keywords))
             (shell-quote-argument (expand-file-name file)))))
 
-(defun transmute--read-tag-items (file)
-  "Return FILE's tag paths from TagsList, or HierarchicalSubject as fallback."
-  (let* ((read-tag (lambda (tag)
-                     (string-trim
-                      (shell-command-to-string
-                       (format "exiftool -s3 -%s %s" tag
-                               (shell-quote-argument (expand-file-name file)))))))
-         (raw (funcall read-tag "TagsList")))
-    (when (or (string-empty-p raw) (string-prefix-p "Warning" raw))
-      (setq raw (replace-regexp-in-string
-                 "|" "/" (funcall read-tag "XMP-lr:HierarchicalSubject"))))
-    (unless (or (string-empty-p raw) (string-prefix-p "Warning" raw))
-      (mapcar #'string-trim (split-string raw "," t)))))
+(defun transmute--read-tag-values (file)
+  "Return FILE's tag list items as a list of strings, or nil.
+Uses TagsList, falling back to HierarchicalSubject.  Exiftool's JSON
+output preserves the difference between a single item that contains
+commas and several separate list items."
+  (let* ((json (shell-command-to-string
+                (format "exiftool -j -TagsList -XMP-lr:HierarchicalSubject %s"
+                        (shell-quote-argument (expand-file-name file)))))
+         (data (ignore-errors (json-read-from-string json)))
+         (record (and (vectorp data) (> (length data) 0) (aref data 0)))
+         (value (alist-get 'TagsList record)))
+    (when (or (null value)
+              (and (vectorp value) (zerop (length value))))
+      (setq value (alist-get 'HierarchicalSubject record)))
+    (cond
+     ((vectorp value)
+      (mapcar (lambda (item) (replace-regexp-in-string "|" "/" item))
+              (append value nil)))
+     ((stringp value)
+      (list (replace-regexp-in-string "|" "/" value)))
+     (t nil))))
 
 ;;;###autoload
 (defun transmute-picture-repair-tags (&optional files)
-  "Repair space-joined tag paths in FILES, or in the selected files.
+  "Repair space- or comma-joined tag paths in FILES, or in the selected files.
 Older versions wrote each line of `transmute-tag-list-file' as a single
 tag path, so \"people@kate family@evie\" became
-\"people/kate family/evie\".  This splits such paths into the intended
-tags and rewrites the tag metadata.  Files whose tag lists are already
-normalised are skipped."
+\"people/kate family/evie\".  A comma-joined single XMP list item is
+repaired as well.  Files whose tag lists are already normalised are
+skipped."
   (interactive)
   (let ((targets (or files (transmute-get-filtered-targets 'any))))
     (transmute-do-batch-async targets
-      (let* ((items (transmute--read-tag-items file))
-             (malformed (cl-some (lambda (item)
-                                   (string-match-p "[[:space:]]" item))
-                                 items))
-             (tags (and items
+      (let* ((values (transmute--read-tag-values file))
+             (malformed (cl-some (lambda (value)
+                                   (string-match-p "[[:space:],]" value))
+                                 values))
+             (tags (and values
                         (delete-dups
-                         (mapcan (lambda (item)
-                                   (split-string item "[[:space:]]+" t))
-                                 items)))))
+                         (mapcan (lambda (value)
+                                   (split-string value "[[:space:],]+" t))
+                                 values)))))
         (cond
-         ((null items)
+         ((null values)
           (transmute--log "[SKIP] %s (no tag list)" file)
           (funcall done))
          ((not malformed)
@@ -2009,21 +2011,10 @@ file.  Each selected line may contain several space-separated tags."
   (interactive (list (completing-read-multiple "Tags: " (transmute--known-tags))))
   (when-let ((targets (transmute-get-filtered-targets 'any)))
     (let* ((tag-list (transmute--split-tag-selection tags))
-           (tag-str (mapconcat #'identity tag-list ","))
-           (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
-           (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
-           (keyword-str (mapconcat #'identity keywords ",")))
+           (tag-str (mapconcat #'identity tag-list ",")))
       (transmute-do-batch-parallel targets
         (transmute--log "[TAG] %s <- %s" file tag-str)
-        (let ((cmd (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s %s"
-                           (shell-quote-argument (format "-TagsList=%s" hier-tag-str))
-                           (shell-quote-argument (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str))
-                           (shell-quote-argument (format "-HierarchicalSubject=%s"
-                                                         (replace-regexp-in-string "/" "|" hier-tag-str)))
-                           (shell-quote-argument (format "-XPKeywords=%s" keyword-str))
-                           (shell-quote-argument (format "-Subject=%s" keyword-str))
-                           (shell-quote-argument (format "-Keywords=%s" keyword-str))
-                           (shell-quote-argument file))))
+        (let ((cmd (transmute--tag-write-command file tag-list)))
           (transmute--run-command-async (file-name-nondirectory file) cmd
                                         (lambda (_proc _exit-code)
                                           (transmute--log "[DONE] %s" file))))))))
@@ -2202,21 +2193,13 @@ their original form."
   (when-let ((targets (transmute-get-filtered-targets 'any)))
     (let* ((tag-list (transmute--split-tag-selection tags))
            (tag-str (mapconcat #'identity tag-list ","))
-           (hier-tag-str (replace-regexp-in-string "@" "/" tag-str))
-           (keywords (delete-dups (sort (mapcan (lambda (tag) (split-string (replace-regexp-in-string "@" " " tag) " " t)) tag-list) #'string<)))
-           (keyword-str (mapconcat #'identity keywords ","))
+           (hier-tag-str (mapconcat (lambda (tag)
+                                      (replace-regexp-in-string "@" "/" tag))
+                                    tag-list ","))
            (formatted-tags (transmute--tags-to-filename hier-tag-str)))
       (transmute-do-batch-parallel targets
         (transmute--log "[TAG] %s <- %s" file tag-str)
-        (let ((cmd (format "exiftool -P -overwrite_original_in_place %s %s %s %s %s %s %s"
-                           (shell-quote-argument (format "-TagsList=%s" hier-tag-str))
-                           (shell-quote-argument (format "-XMP-microsoft:LastKeywordXMP=%s" hier-tag-str))
-                           (shell-quote-argument (format "-HierarchicalSubject=%s"
-                                                         (replace-regexp-in-string "/" "|" hier-tag-str)))
-                           (shell-quote-argument (format "-XPKeywords=%s" keyword-str))
-                           (shell-quote-argument (format "-Subject=%s" keyword-str))
-                           (shell-quote-argument (format "-Keywords=%s" keyword-str))
-                           (shell-quote-argument file))))
+        (let ((cmd (transmute--tag-write-command file tag-list)))
           (transmute--run-command-async
            (file-name-nondirectory file) cmd
            (lambda (_proc exit-code)
